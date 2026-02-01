@@ -1,4 +1,9 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -9,15 +14,23 @@
 */
 bool do_system(const char *cmd)
 {
+// following the man page https://man7.org/linux/man-pages/man3/system.3.html
+    int status = system(cmd);
 
-/*
- * TODO  add your code here
- *  Call the system() function with the command set in the cmd
- *   and return a boolean true if the system() call completed with success
- *   or false() if it returned a failure
-*/
+    if (cmd == NULL){
+        return false;
+    }
+    // error occurred in system() call
+    if (status == -1){
+        return false;
+    }
 
-    return true;
+    // normal termination
+    if (WIFEXITED (status)){
+        return WEXITSTATUS(status) == 0; // return true if exit status is 0
+    }
+
+    return false;
 }
 
 /**
@@ -49,19 +62,42 @@ bool do_exec(int count, ...)
     // and may be removed
     command[count] = command[count];
 
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
+    // From Linux System Programming page 161
+    int status;
+    pid_t pid;
+
+    pid = fork();
+    // fork failed
+    if (pid == -1){
+        va_end(args);
+        return false;
+    }
+    else if (pid == 0) {
+        execv(command[0], command);
+        exit(-1); // exec() functions only return if an error has occurred
+    }
+
+    // error in child process
+    if (waitpid (pid, &status, 0) == -1){
+        va_end(args);
+        return false;
+    }
+    
+    // execv returned exit status
+    if (WIFEXITED (status)){
+        /* for printf messages for debuging
+        printf("Command executed: \n");
+        for (int i = 0; i < count; i++){
+            printf("arg %d: %s\n", i, command[i]);
+        }
+        printf("exit status was %d\n", WEXITSTATUS(status));
+        */
+        va_end(args);
+        return WEXITSTATUS(status) == 0; // return true if exit status is 0
+    }
 
     va_end(args);
-
-    return true;
+    return false;
 }
 
 /**
@@ -84,16 +120,48 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     // and may be removed
     command[count] = command[count];
 
+    // Create file
+    int fd = open(outputfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1){
+        va_end(args);
+        return false;
+    }
 
-/*
- * TODO
- *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
- *   redirect standard out to a file specified by outputfile.
- *   The rest of the behaviour is same as do_exec()
- *
-*/
+
+    // From Linux System Programming page 161
+    int status;
+    pid_t pid;
+
+    pid = fork();
+    // fork failed
+    if (pid == -1){
+        va_end(args);
+        return false;
+    }
+    else if (pid == 0) {
+        // redirect strdout to file
+        int redirect_status = dup2(fd, 1);
+        if (redirect_status == -1){ // error in dup2
+            exit(-1);
+        }
+        close(fd);
+
+        execv(command[0], command);
+        exit(-1); // exec() functions only return if an error has occurred
+    }
+
+    // error in child process
+    if (waitpid (pid, &status, 0) == -1){
+        va_end(args);
+        return false;
+    }
+
+    // execv returned exit status
+    if (WIFEXITED (status)){
+        va_end(args);
+        return WEXITSTATUS(status) == 0; // return true if exit status is 0
+    }
 
     va_end(args);
-
-    return true;
+    return false;
 }
