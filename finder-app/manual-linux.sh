@@ -58,6 +58,8 @@ if [ ! -e ${OUTDIR}/linux-stable/arch/${ARCH}/boot/Image ]; then
 fi
 
 echo "Adding the Image in outdir"
+cd "$OUTDIR"
+cp ${OUTDIR}/linux-stable/arch/${ARCH}/boot/Image $OUTDIR
 
 echo "Creating the staging directory for the root filesystem"
 cd "$OUTDIR"
@@ -68,6 +70,8 @@ then
 fi
 
 # TODO: Create necessary base directories
+mkdir "${OUTDIR}/rootfs"
+cd "${OUTDIR}/rootfs"
 mkdir -p bin dev etc home lib lib64 proc sbin sys tmp usr var
 mkdir -p usr/bin usr/lib usr/sbin
 mkdir -p var/log
@@ -90,8 +94,8 @@ make -j8 ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE}
 make -j8 CONFIG_PREFIX="${OUTDIR}/rootfs" ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} install
 
 echo "Library dependencies"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
+${CROSS_COMPILE}readelf -a busybox | grep "program interpreter"
+${CROSS_COMPILE}readelf -a busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
 cd "${OUTDIR}/rootfs"
@@ -111,17 +115,19 @@ sudo mknod -m 600 dev/console c 5 1
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
 cd "${OUTDIR}/rootfs"
+mkdir home/conf
 cp ${SCRIPT_DIR}/writer home
 cp ${SCRIPT_DIR}/finder.sh home
-cp ${SCRIPT_DIR}/../conf/username.txt home
-cp ${SCRIPT_DIR}/../conf/assignment.txt home
+cp ${SCRIPT_DIR}/../conf/username.txt home/conf
+cp ${SCRIPT_DIR}/../conf/assignment.txt home/conf
 cp ${SCRIPT_DIR}/finder-test.sh home
 cp ${SCRIPT_DIR}/autorun-qemu.sh home
 
 # TODO: Chown the root directory
 cd "${OUTDIR}/rootfs"
-sudo chown -R root:root 
+sudo chown -R root:root *
 
 # TODO: Create initramfs.cpio.gz
 find . | cpio -H newc -ov --owner root:root > ${OUTDIR}/initramfs.cpio
+cd ${OUTDIR}
 gzip -f initramfs.cpio
