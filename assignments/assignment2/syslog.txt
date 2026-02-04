@@ -1,0 +1,18 @@
+hyounjun@Ubuntu:~/Desktop/assignment/finder-app$ sudo grep --text "writer_syslog" /var/log/syslog
+Jan 25 12:39:06 Ubuntu writer_syslog[11587]: Not enough input parameters
+Jan 25 12:39:40 Ubuntu writer_syslog[11678]: Not enough input parameters
+Jan 25 12:42:12 Ubuntu writer_syslog[11981]: Not enough input parameters
+Jan 25 12:42:19 Ubuntu writer_syslog[11996]: Error opening/creating file
+Jan 25 12:48:29 Ubuntu writer_syslog[12499]: Writing hello-world to hello.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12829]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang1.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12830]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang2.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12831]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang3.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12832]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang4.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12833]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang5.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12834]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang6.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12835]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang7.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12836]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang8.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12837]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang9.txt
+Jan 25 12:51:01 Ubuntu writer_syslog[12838]: Writing AELD_IS_FUN to /tmp/aeld-data/hyounjunchang10.txt
+Jan 25 12:51:37 Ubuntu writer_syslog[12957]: Error opening/creating file
+Jan 25 12:51:47 Ubuntu writer_syslog[13007]: Not enough input parameters
