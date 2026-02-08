@@ -11,6 +11,7 @@
 
 void* threadfunc(void* thread_param)
 {
+    //DEBUG_LOG("threadfunc() called");
     // TODO: wait, obtain mutex, wait, release mutex as described by thread_data structure
     // hint: use a cast like the one below to obtain thread arguments from your parameter
     struct thread_data* thread_func_args = (struct thread_data *) thread_param;
@@ -36,6 +37,7 @@ void* threadfunc(void* thread_param)
         a = b;
         b = tmp;   
     }
+    //DEBUG_LOG("Awake");
 
     int rc;
     rc = pthread_mutex_lock(thread_func_args->mutex);
@@ -44,7 +46,7 @@ void* threadfunc(void* thread_param)
         return thread_param;
     } 
 
-    DEBUG_LOG("Mutex Locked");
+    //DEBUG_LOG("Mutex Locked");
 
     // Wait before releasing mutex
     wait_sec = thread_func_args->release_ms / 1000;
@@ -71,7 +73,7 @@ void* threadfunc(void* thread_param)
         return thread_param;
     }
 
-    DEBUG_LOG("Mutex Unlocked");
+    //DEBUG_LOG("Mutex Unlocked");
     
     return thread_param;
 }
@@ -105,31 +107,17 @@ bool start_thread_obtaining_mutex(pthread_t *thread, pthread_mutex_t *mutex,int 
     thread_setup->obtain_ms = wait_to_obtain_ms;
     thread_setup->release_ms = wait_to_release_ms;
     thread_setup->mutex = mutex;
-
-    // setup mutex
-    pthread_mutex_init(mutex, NULL);
+    //DEBUG_LOG("Thread Setup Successful");
+    //fflush(stdout);
 
     int rc;
 
     // create a thread and call threadfunc()
     rc = pthread_create(thread, NULL, threadfunc, (void *)thread_setup);
-
     if (rc != 0){
         ERROR_LOG("pthread_create() failed");
         return false;
     }
-    DEBUG_LOG("pthread_create() called");
-
-    // wait for threadfunc() to finish
-    rc = pthread_join(*thread, NULL);
-    if (rc != 0){
-        ERROR_LOG("pthread_join() failed");
-    }
-    DEBUG_LOG("pthread_join() called");
-
-    bool success = thread_setup->thread_complete_success;
-    free (thread_setup);
-
-    return success;
+    return true;
 }
 
