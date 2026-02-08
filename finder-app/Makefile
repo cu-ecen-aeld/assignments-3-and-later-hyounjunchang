@@ -2,8 +2,8 @@
 all: writer
 
 # cross-compile definition
-CROSS_COMPILE := aarch64-none-linux-gnu-
-#CROSS_COMPILE := 
+#CROSS_COMPILE := aarch64-none-linux-gnu-
+CROSS_COMPILE :=
 
 CC := gcc
 CFLAGS := -Wall
