@@ -32,6 +32,7 @@ bool CONNECTION_ALIVE = false;
 
 // for SIGINT termination (since using single-thread)
 FILE *fptr;
+FILE *rptr;
 int sockfd, conn_fd;
 char s[INET6_ADDRSTRLEN];
 
@@ -100,7 +101,7 @@ int main(int argc, char **argv)
         syslog(LOG_DEBUG, "Starting server...");
     }
     
-    fptr = fopen(TMPFILE, "wb+"); // create file, overwrite if exists, with read and write permission
+    fptr = fopen(TMPFILE, "w+"); // create file, overwrite if exists, with read and write permission
 
     // Check if the file was opened successfully
     if (fptr == NULL) {
@@ -182,7 +183,6 @@ int main(int argc, char **argv)
     
     char recv_buf[BUFSIZE+1];
     char send_buf[BUFSIZE+1];
-    ssize_t packet_len = 0;
 
 	while(1) {  // main loop
         // connection operations first
@@ -216,37 +216,50 @@ int main(int argc, char **argv)
             if (nmem_written == 0){
                 syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
             }
-            for (ssize_t i = 0; i < bytes_read_socket; i++){
-                // increment packet size
-                packet_len++;
+            
+            bool send_file = false;
+
+            for (int i = 0; i < bytes_read_socket; i++){
                 if (recv_buf[i] == '\n'){
-                    long bytes_rewind = -1 * packet_len;
-                    
-                    // set fileptr
-                    rv = fseek(fptr, bytes_rewind, SEEK_CUR);
-                    if (rv == -1){
-                        syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
-                    }
-                    // send the packet
-                    for (ssize_t j = 0; j < packet_len; j+= BUFSIZE){
-                        ssize_t bytes_to_send = BUFSIZE;
-                        if (packet_len - j < BUFSIZE){
-                            bytes_to_send = packet_len - j;
-                        }
-                        size_t nmem_sent = fread(send_buf, bytes_to_send, 1, fptr);
-                        if (nmem_sent == 0){
-                            syslog(LOG_ERR, "Error with fread(), Error: %s", strerror(errno));
-                        }
-                        
-                        // Blocking write
-                        ssize_t bytes_sent_socket = send(conn_fd, send_buf, bytes_to_send, 0);
-                        if (bytes_sent_socket != bytes_to_send){
-                            syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
-                        }
-                        syslog(LOG_DEBUG, "%ld bytes sent to %s", bytes_sent_socket, s);
-                    }
-                    packet_len = 0;
+                    send_file = true;
                 }
+            }
+            if (send_file){
+                // set fileptr
+                rv = fseek(fptr, 0, SEEK_SET);
+                if (rv == -1){
+                    syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
+                }
+
+                // send file
+                size_t bytes_to_send = fread(send_buf, 1, 1, fptr);
+
+                /*
+                if (ferror(fptr)) {
+                    syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
+                    END_CONNECTION = true;
+                }
+                // reached end of file 
+                else if (feof(fptr)) {
+                    bytes_to_send = bytes_read_file;
+                }
+                */
+                while (bytes_to_send > 0){
+                    // Blocking write
+                    ssize_t bytes_sent_socket = send(conn_fd, send_buf, bytes_to_send, 0);
+                    if (bytes_sent_socket != bytes_to_send){
+                        syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
+                    }
+                    bytes_to_send = fread(send_buf, 1, 1, fptr);
+                }
+                
+                syslog(LOG_DEBUG, "File sent");
+                
+                // reset file pointer
+                rv = fseek(fptr, 0, SEEK_END);
+                if (rv == -1){
+                    syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
+                }          
             }
         }
         if (!CONNECTION_ALIVE){
@@ -266,7 +279,6 @@ int main(int argc, char **argv)
             }
             CONNECTION_ALIVE = true;
         }
-
         if (END_CONNECTION){
             syslog(LOG_DEBUG, "Caught signal, exiting");
             if (fptr){
@@ -279,8 +291,7 @@ int main(int argc, char **argv)
                 syslog(LOG_DEBUG, "Closed connection from %s\n", s);
             }
             closelog();
-            exit(0); 
-            
+            exit(0);    
         }
     }
 	return 0;
