@@ -186,7 +186,7 @@ int main(int argc, char **argv)
 
 	while(1) {  // main loop
         // connection operations first
-        ssize_t bytes_read_socket = recv(conn_fd, recv_buf, BUFSIZE, MSG_PEEK|MSG_DONTWAIT);
+        ssize_t bytes_read_socket = recv(conn_fd, recv_buf, BUFSIZE, MSG_DONTWAIT);
         if (bytes_read_socket < 0){
             if (errno != EAGAIN){
                 syslog(LOG_ERR, "Errors recv(), Error: %s", strerror(errno));
@@ -196,8 +196,8 @@ int main(int argc, char **argv)
         else if (bytes_read_socket == 0){
             // if recv returns zero, that means the connection has been closed:
             close(conn_fd);
-            CONNECTION_ALIVE = false;
             syslog(LOG_DEBUG, "Closed connection from %s\n", s);
+            CONNECTION_ALIVE = false;
 
             // listen again
             if (listen(sockfd, BACKLOG) == -1) {
@@ -206,23 +206,7 @@ int main(int argc, char **argv)
 		        exit(-1);
             }
 
-            printf("server: waiting for connections...\n");
-            
-            sin_size = sizeof their_addr;
-            conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-            if (conn_fd == -1) {
-                syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
-                closelog();
-                exit(-1);
-            }
-            int status;
-            status = fcntl(conn_fd, F_SETFL, O_NONBLOCK);
-            if (status == -1){
-                syslog(LOG_ERR, "Failed during fnctl(), Error: %s", strerror(errno));
-                closelog();
-                exit(-1);
-            }
-            CONNECTION_ALIVE = true;
+            printf("server: waiting for connections...\n");          
         }
         else{
             syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, s);
@@ -235,10 +219,8 @@ int main(int argc, char **argv)
             for (ssize_t i = 0; i < bytes_read_socket; i++){
                 // increment packet size
                 packet_len++;
-                
                 if (recv_buf[i] == '\n'){
                     long bytes_rewind = -1 * packet_len;
-                    packet_len--; // Ignore \n for packet
                     
                     // set fileptr
                     rv = fseek(fptr, bytes_rewind, SEEK_CUR);
@@ -263,13 +245,29 @@ int main(int argc, char **argv)
                         }
                         syslog(LOG_DEBUG, "%ld bytes sent to %s", bytes_sent_socket, s);
                     }
-                    // move file pointer by 1 to skip \n
-                    fseek(fptr, 1, SEEK_CUR);
                     packet_len = 0;
                 }
             }
         }
-        if  (END_CONNECTION){
+        if (!CONNECTION_ALIVE){
+            sin_size = sizeof their_addr;
+            conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
+            if (conn_fd == -1) {
+                syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
+                closelog();
+                exit(-1);
+            }
+            int status;
+            status = fcntl(conn_fd, F_SETFL, O_NONBLOCK);
+            if (status == -1){
+                syslog(LOG_ERR, "Failed during fnctl(), Error: %s", strerror(errno));
+                closelog();
+                exit(-1);
+            }
+            CONNECTION_ALIVE = true;
+        }
+
+        if (END_CONNECTION){
             syslog(LOG_DEBUG, "Caught signal, exiting");
             if (fptr){
                 fclose(fptr);
