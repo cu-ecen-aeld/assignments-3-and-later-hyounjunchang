@@ -23,39 +23,33 @@ Modified by Hyounjun Chang for ECEN5713
 
 #define PORT "9000"  // the port users will be connecting to
 #define BACKLOG 10     // how many pending connections queue holds
+#define TMPFILE "/var/tmp/aesdsocketdata"
 
 // Global Variable
 bool END_CONNECTION = false;
+bool CONNECTION_ALIVE = false;
+
+// for SIGINT termination (since using single-thread)
+FILE *fptr;
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
 {
     if (signo == SIGINT || signo == SIGTERM){
-        END_CONNECTION = true;
+        // Graceful termination
+        if (CONNECTION_ALIVE){
+            END_CONNECTION = true;
+        }
+        else{
+            if (fptr){
+                fclose(fptr);
+            }
+            remove(TMPFILE);
+            closelog();
+            exit(0);            
+        }
     }
     return;
-}
-
-void sigchld_handler(int s)
-{
-	(void)s; // quiet unused variable warning
-
-	// waitpid() might overwrite errno, so we save and restore it:
-	int saved_errno = errno;
-
-	while(waitpid(-1, NULL, WNOHANG) > 0);
-
-	errno = saved_errno;
-}
-
-// get sockaddr, IPv4 or IPv6:
-void *get_in_addr(struct sockaddr *sa)
-{
-	if (sa->sa_family == AF_INET) {
-		return &(((struct sockaddr_in*)sa)->sin_addr);
-	}
-
-	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
 int main(int argc, char **argv)
@@ -81,29 +75,26 @@ int main(int argc, char **argv)
         int rc = daemon(0,0);// wokring directory to "/", output to "/dev/null"
         if (rc != 0){
             perror("Error creating daemon");
-            return -1;
+            exit(-1);
         }
         // log as daemon
-        openlog("server_syslog", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_DAEMON);
+        openlog("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_DAEMON);
         syslog(LOG_DEBUG, "Starting server as daemon...");
     }
     else{
         // write to console if no logger, Include PID, no delay, error to console
-        openlog("server_syslog", LOG_CONS | LOG_PID | LOG_NDELAY | LOG_PERROR, LOG_USER);
+        openlog("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY | LOG_PERROR, LOG_USER);
         syslog(LOG_DEBUG, "Starting server...");
     }
-
-    // File write example from Google Serach
-    FILE *fptr;
-
+    
     // create file, overwrite if exists
-    fptr = fopen("/var/tmp/aesdsocketdata", "w");
+    fptr = fopen(TMPFILE, "w");
 
     // Check if the file was opened successfully
     if (fptr == NULL) {
         syslog(LOG_ERR, "Error opening /var/tmp/aesdsocketdata");
         closelog();
-        return -1;
+        exit(-1);
     }
 
 	// listen on sock_fd, new connection on new_fd
@@ -111,9 +102,7 @@ int main(int argc, char **argv)
 	struct addrinfo hints, *servinfo, *p;
 	struct sockaddr_storage their_addr; // connector's address info
 	socklen_t sin_size;
-	struct sigaction sa;
 	int yes=1;
-	char s[INET6_ADDRSTRLEN];
 	int rv;
 
 	memset(&hints, 0, sizeof hints); // clear memory
@@ -124,23 +113,27 @@ int main(int argc, char **argv)
 	if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
         syslog(LOG_ERR, "getaddrinfo: %s\n", gai_strerror(rv));
         closelog();
-		return -1;
+	    exit(-1);
 	}
 
-	// loop through all the results and bind to the first we can
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-			continue;
-		}
-        // set socket options
-		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-			exit(1);
-		}
-		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			continue;
-		}
+
+    // loop through all the results and bind to the first we can
+    for(p = servinfo; p != NULL; p = p->ai_next) {
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd == -1) {
+            continue;
+        }
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+            syslog(LOG_ERR, "setsockopt() failed");
+            closelog();
+            exit(-1);
+        }
+        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            continue;
+        }
         // bind successful
-		break;
+        break;
     }
 	
 	freeaddrinfo(servinfo); // all done with this structure
@@ -148,58 +141,47 @@ int main(int argc, char **argv)
 	if (p == NULL)  {
         syslog(LOG_ERR, "Failed to bind()");
 		closelog();
-		return -1;
+		exit(-1);
 	}
 	if (listen(sockfd, BACKLOG) == -1) {
 		syslog(LOG_ERR, "Failed during listen()");
 		closelog();
-		return -1;
+		exit(-1);
 	}
 
-    // reap all dead processes
-	sa.sa_handler = sigchld_handler; 
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-		syslog(LOG_ERR, "Failed during sigaction()");
-		return -1;
-	}
+    printf("server: waiting for connections...\n");
 
-	printf("server: waiting for connections...\n");
+	sin_size = sizeof their_addr;
+	new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
+	if (new_fd == -1) {
+		syslog(LOG_ERR, "Failed during accept()");
+		closelog();
+		exit(-1);
+	}
+    int status;
+    status = fcntl(new_fd, F_SETFL, O_NONBLOCK);
+    if (status == -1){
+        syslog(LOG_ERR, "Failed during fnctl()");
+		closelog();
+		exit(-1);
+    }
+    CONNECTION_ALIVE = true;
 
 	while(1) {  // main accept() loop
+
+        // completing any open connection operations first
+
 
         // Gracefully exits when SIGINT or SIGTERM is received
         if (END_CONNECTION){
             syslog(LOG_DEBUG, "Caught SIGINT or SIGTERM, exiting");
-            // completing any open connection operations
             // closing any open sockets
+            close(new_fd);
             // deleting the file /var/tmp/aesdsocketdata.
             fclose(fptr);
-            exit (0);
+            remove(TMPFILE);
+            exit(0);
         }
-
-		sin_size = sizeof their_addr;
-		new_fd = accept(sockfd, (struct sockaddr *)&their_addr,
-				&sin_size);
-		if (new_fd == -1) {
-			perror("accept");
-			continue;
-		}
-
-		inet_ntop(their_addr.ss_family,
-			get_in_addr((struct sockaddr *)&their_addr),
-			s, sizeof s);
-		printf("server: got connection from %s\n", s);
-
-		if (!fork()) { // this is the child process
-			close(sockfd); // child doesn't need the listener
-			if (send(new_fd, "Hello, world!", 13, 0) == -1)
-				perror("send");
-			close(new_fd);
-			exit(0);
-		}
-		close(new_fd);  // parent doesn't need this
 	}
 
 
