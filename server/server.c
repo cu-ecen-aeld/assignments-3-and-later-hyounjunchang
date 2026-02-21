@@ -71,24 +71,30 @@ void* acceptRequests(void* thread_param){
     struct sockaddr_storage their_addr; // connector's address info
 	socklen_t sin_size;
     int rc, new_conn_fd;
-    char s[INET6_ADDRSTRLEN];
+    char client_str[INET6_ADDRSTRLEN];
 
     while (1){
         sin_size = sizeof their_addr;
         new_conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
         if (new_conn_fd == -1) {
-            syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
-            continue;
+            if (ECONNABORTED){
+                syslog(LOG_DEBUG, "Connection to socket aborted, no longer accepting requests...");
+            }
+            else{
+                syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
+            }
+            break;
         }
         int status;
         status = fcntl(new_conn_fd, F_SETFL, O_NONBLOCK);
         if (status == -1){
             syslog(LOG_ERR, "Failed during fnctl(), Error: %s", strerror(errno));
             close(new_conn_fd);
-            continue;
+            break;
         }
-        inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
-        syslog(LOG_DEBUG, "Accepted connection from %s\n", s);
+
+        inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), client_str, sizeof client_str);
+        syslog(LOG_DEBUG, "Accepted connection from %s\n", client_str);
 
         //Create a new child thread too handle connection
         struct thread_handleData* threadData = (struct thread_handleData*) malloc(sizeof(struct thread_handleData));
@@ -104,10 +110,12 @@ void* acceptRequests(void* thread_param){
             // setup parameters so it can be freed
             threadData->conn_fd = new_conn_fd;
             threadData->connection_alive = true;
+            strcpy(threadData->client_addr_str, client_str);
+
             newNodeThread->paramData = threadData;
             newNodeThread->next = NULL;
 
-            rc = pthread_create(newNodeThread->thread, NULL, handleRequests, (void*)threadData);
+            rc = pthread_create(&(newNodeThread->thread), NULL, handleRequests, (void*)threadData);
             if (rc != 0){
                 syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
                 free(threadData);
@@ -118,7 +126,7 @@ void* acceptRequests(void* thread_param){
             rc = pthread_mutex_lock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-                continue;
+                break;
             } 
             // Add thread to linked list
             if (threadList.head){
@@ -129,9 +137,8 @@ void* acceptRequests(void* thread_param){
             rc = pthread_mutex_unlock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
-                continue;
+                break;
             } 
-
         }
     }
     return thread_param;
@@ -145,7 +152,6 @@ void* handleRequests(void* thread_param){
 
     // initialize buffers in stack
     bool CONNECTION_ALIVE = true;
-    char s[INET6_ADDRSTRLEN];
     char recv_buf[BUFSIZE+1];
     char send_buf[BUFSIZE+1];
     bool last_char_is_newline = false;
@@ -166,7 +172,7 @@ void* handleRequests(void* thread_param){
             CONNECTION_ALIVE = false;     
         }
         else{
-            syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, s);
+            syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, thread_func_args->client_addr_str);
 
             // Update Linked List of Threads
             rc = pthread_mutex_lock(bufferFile.mutex);
@@ -202,7 +208,7 @@ void* handleRequests(void* thread_param){
                         bytes_to_send = fread(send_buf, 1, 1, bufferFile.fptr);
                     }
                     
-                    syslog(LOG_DEBUG, "File sent");
+                    syslog(LOG_DEBUG, "File sent to %s\n", thread_func_args->client_addr_str);
                     
                     // reset file pointer
                     rc = fseek(bufferFile.fptr, 0, SEEK_END);
@@ -238,6 +244,7 @@ int main(int argc, char **argv){
 
     // set up global variables;
     threadList.head = NULL;
+    // Mutexes are set up later so they don't have to be destroyed if initialization fails early
 
     // Set up signal handler
     if (signal (SIGINT, signal_handler) == SIG_ERR) {
@@ -331,6 +338,11 @@ int main(int argc, char **argv){
 		exit(-1);
 	}
     printf("server: waiting for connections...\n");
+
+    // Set up mutex
+    pthread_mutex_t fileMutex, listMutex;
+    threadList.mutex = &listMutex;
+    bufferFile.mutex = &fileMutex;
     
     // Setup Mutexes required for threads
     if (pthread_mutex_init(threadList.mutex, NULL) != 0) {
@@ -377,7 +389,8 @@ int main(int argc, char **argv){
             syslog(LOG_DEBUG, "Caught signal, exiting");
 
             // closes acceptRequests() thread
-            close(sockfd); 
+            shutdown(sockfd, SHUT_RDWR);
+            close(sockfd);
             free(threadData);
             pthread_join(accept_thread, NULL);
             
@@ -391,13 +404,15 @@ int main(int argc, char **argv){
                 // close connections
                 close(threadList.head->paramData->conn_fd);
                 // wait for handleRequests thread to finish
-                pthread_join(*(threadList.head->thread), NULL);
+                pthread_join(threadList.head->thread, NULL);
                 // free data
                 free(threadList.head->paramData);
                 struct Node_thread *tmpNode = threadList.head;
                 threadList.head = threadList.head->next;
                 free(tmpNode);
             }
+            syslog(LOG_DEBUG, "Existing connections disconnected");
+
             rc = pthread_mutex_unlock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
@@ -424,8 +439,9 @@ int main(int argc, char **argv){
             // Delete mutex
             pthread_mutex_destroy(threadList.mutex);
             pthread_mutex_destroy(bufferFile.mutex);
-            closelog();
             remove(FILENAME); 
+            syslog(LOG_DEBUG, "File %s destroyed", FILENAME);
+            closelog();
             exit(0);   
         }
 
@@ -445,8 +461,9 @@ int main(int argc, char **argv){
                 // close connections
                 close(current->paramData->conn_fd);
                 // wait for handleRequests thread to finish
-                pthread_join(*(current->thread), NULL);
-                
+                pthread_join(current->thread, NULL);
+                syslog(LOG_DEBUG, "Close connection with fd: %d", current->paramData->conn_fd);
+
                 // free data
                 free(current->paramData);
                 if (previous){

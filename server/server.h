@@ -6,7 +6,7 @@
 
 // Holds thread and its parameters
 struct Node_thread{
-    pthread_t* thread;
+    pthread_t thread;
     struct thread_handleData* paramData;
     struct Node_thread* next;
 };
@@ -15,6 +15,7 @@ struct Node_thread{
 struct thread_handleData{
     int conn_fd;
     bool connection_alive;
+    char client_addr_str[INET6_ADDRSTRLEN];
 };
 
 // Parameters for acceptRequests()
