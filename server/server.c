@@ -489,10 +489,10 @@ int main(int argc, char **argv){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
             }
             while (threadList.head){
-                // close connections
-                close(threadList.head->paramData->conn_fd);
                 // wait for handleRequests thread to finish
                 pthread_join(threadList.head->thread, NULL);
+                // close connections
+                close(threadList.head->paramData->conn_fd);
                 // free data
                 free(threadList.head->paramData);
                 struct Node_thread *tmpNode = threadList.head;
