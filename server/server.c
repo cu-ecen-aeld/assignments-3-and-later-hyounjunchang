@@ -66,7 +66,6 @@ void signal_handler (int signo)
     // SIGPIPE and SIGABRT added for valgrind
     if (signo == SIGINT || signo == SIGTERM ){
         CLOSE_SERVER = true;
-        syslog(LOG_DEBUG, "Interrupt received in handler...");
     }
     return;
 }
@@ -482,30 +481,6 @@ int main(int argc, char **argv){
         if (CLOSE_SERVER){
             syslog(LOG_DEBUG, "Caught signal, exiting");
 
-            // close timer thread
-            pthread_join(timer_thread, NULL);
-
-            // Close all connections
-            rc = pthread_mutex_lock(threadList.mutex);
-            if (rc != 0){
-                syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-            }
-            while (threadList.head){
-                // close connections
-                close(threadList.head->conn_fd);
-                // wait for handleRequests thread to finish
-                pthread_join(threadList.head->thread, NULL);
-                struct Node_thread *tmpNode = threadList.head;
-                threadList.head = threadList.head->next;
-                free(tmpNode);
-            }
-            syslog(LOG_DEBUG, "Existing connections disconnected");
-
-            rc = pthread_mutex_unlock(threadList.mutex);
-            if (rc != 0){
-                syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
-            }
-
             // Stop reads/writes
             shutdown(sockfd, SHUT_RDWR);
             close(sockfd);
@@ -513,18 +488,23 @@ int main(int argc, char **argv){
             pthread_join(accept_thread, NULL);
 
             // close file
-            rc = pthread_mutex_lock(bufferFile.mutex);
-            if (rc != 0){
-                syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-            }
             fclose(bufferFile.fptr);
             remove(FILENAME); 
             syslog(LOG_DEBUG, "File %s destroyed", FILENAME);
 
-            rc = pthread_mutex_unlock(bufferFile.mutex);
-            if (rc != 0){
-                syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
+            // close timer thread
+            pthread_join(timer_thread, NULL);
+
+            // Close all connections
+            while (threadList.head){
+                pthread_join(threadList.head->thread, NULL);
+                // close connections
+                close(threadList.head->conn_fd);
+                struct Node_thread *tmpNode = threadList.head;
+                threadList.head = threadList.head->next;
+                free(tmpNode);
             }
+            syslog(LOG_DEBUG, "Existing connections disconnected");
 
             // Delete mutex
             pthread_mutex_destroy(threadList.mutex);
@@ -533,7 +513,6 @@ int main(int argc, char **argv){
             closelog();
             exit(0);   
         }
-
         // Join threads that completed if there are active connections 
         struct Node_thread* previous = NULL;
         struct Node_thread* current = threadList.head;
@@ -551,10 +530,10 @@ int main(int argc, char **argv){
                 current = current->next;
             }
             else{
-                // close connections
-                close(current->conn_fd);
                 // wait for handleRequests thread to finish
                 pthread_join(current->thread, NULL);
+                // close connections
+                close(current->conn_fd);
                 syslog(LOG_DEBUG, "Close connection with fd: %d", current->conn_fd);
                 if (previous){
                     previous->next = current->next;
