@@ -11,6 +11,7 @@ Modified by Hyounjun Chang for ECEN5713
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -50,6 +51,7 @@ struct fileHandler bufferFile;
 
 int sockfd;
 
+void daemonize();
 void timer_handler(int sig, siginfo_t *si, void *uc);
 void signal_handler (int signo);
 void *get_in_addr(struct sockaddr *sa);
@@ -57,6 +59,32 @@ int printCurrentTime(void);
 int writeTimeEvery10Sec(void* thread_param);
 void* acceptRequests(void* thread_param);
 void* handleRequests(void* thread_param);
+
+// From Gemini Results
+void daemonize() {
+    pid_t pid = fork();
+
+    if (pid < 0) exit(EXIT_FAILURE); // Error
+    if (pid > 0) exit(EXIT_SUCCESS); // Parent exits
+
+    // Child becomes session leader
+    if (setsid() < 0) exit(EXIT_FAILURE);
+
+    // Fork again to prevent re-acquiring controlling terminal
+    pid = fork();
+    if (pid < 0) exit(EXIT_FAILURE);
+    if (pid > 0) exit(EXIT_SUCCESS);
+
+    // Set permissions, chdir to root, close FDs
+    umask(0);
+    chdir("/");
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+    open("/dev/null", O_RDWR); // stdin
+    dup(0); // stdout
+    dup(0); // stderr
+}
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
@@ -348,11 +376,7 @@ int main(int argc, char **argv){
 
     // Open syslog
     if (RUN_AS_DAEMON){
-        int rc = daemon(0,0);// wokring directory to "/", output to "/dev/null"
-        if (rc != 0){
-            perror("Error creating daemon");
-            exit(-1);
-        }
+        daemonize();
         // log as daemon
         openlog("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_DAEMON);
         syslog(LOG_DEBUG, "Starting server as daemon...");
