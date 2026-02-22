@@ -518,18 +518,12 @@ int main(int argc, char **argv){
 	while(1) {  // main loop
         if (CLOSE_SERVER){
             syslog(LOG_DEBUG, "Caught signal, exiting");
-
-            // closes acceptRequests() thread
-            shutdown(sockfd, SHUT_RDWR);
-            close(sockfd);
-            free(threadData);
-            pthread_join(accept_thread, NULL);
             
             // Close all connections
             rc = pthread_mutex_lock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-                goto close_file;
+                goto stop_accept;
             }
             while (threadList.head){
                 // close connections
@@ -547,11 +541,17 @@ int main(int argc, char **argv){
             rc = pthread_mutex_unlock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
-                goto close_file;
+                goto stop_accept;
             }
 
+            stop_accept:
+            // closes acceptRequests() thread
+            shutdown(sockfd, SHUT_RDWR);
+            close(sockfd);
+            free(threadData);
+            pthread_join(accept_thread, NULL);
+
             // close file
-            close_file:
             rc = pthread_mutex_lock(bufferFile.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
