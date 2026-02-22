@@ -23,32 +23,40 @@ Modified by Hyounjun Chang for ECEN5713
 
 #define PORT "9000"  // the port users will be connecting to
 #define BACKLOG 10     // how many pending connections queue holds
-#define TMPFILE "/var/tmp/aesdsocketdata"
+#define FILENAME "/var/tmp/aesdsocketdata"
 #define BUFSIZE 2048
 
-// Global Variable
-bool END_CONNECTION = false;
-bool CONNECTION_ALIVE = false;
+#include <pthread.h>
+#include "server.h"
+
+// for Linked List
+struct slisthead head;
+SLIST_HEAD(slisthead, entry);
+
+// Global Variable, guarntees atomicity
+volatile sig_atomic_t CLOSE_SERVER = 0;
+volatile sig_atomic_t SERVER_LISTENING = 0;
+
+pthread_mutex_t *fmutex;
+pthread_mutex_t *lmutex;
 
 // for SIGINT termination (since using single-thread)
-FILE *fptr;
-FILE *rptr;
-int sockfd, conn_fd;
+FILE *wptr;
 char s[INET6_ADDRSTRLEN];
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
 {
     if (signo == SIGINT || signo == SIGTERM){
-        if (CONNECTION_ALIVE){
-            END_CONNECTION = true;
+        if (SERVER_LISTENING){
+            CLOSE_SERVER = 1;
         }
         else{
             syslog(LOG_DEBUG, "Caught signal, exiting");
-            if (fptr){
-                fclose(fptr);
+            if (wptr){
+                fclose(wptr);
             }
-            remove(TMPFILE); // deleting the file /var/tmp/aesdsocketdata.
+            remove(FILENAME); // deleting the file /var/tmp/aesdsocketdata.
             closelog();
             exit(0); 
         }
@@ -66,17 +74,102 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-int main(int argc, char **argv)
-{
-    // Set up signal handler
-    if (signal (SIGINT, signal_handler) == SIG_ERR) {
-        fprintf (stderr, "Cannot handle SIGINT!\n");
-        exit(-1);
+void* handleRequests(void* thread_param) {
+    struct entry* thread_func_args = (struct entry*) thread_param;
+
+    int conn_fd = thread_func_args->conn_fd;
+    struct sockaddr_in client_addr = thread_func_args-> client_addr;
+
+    // buffers
+    char recv_buf[BUFSIZE+1];
+    char send_buf[BUFSIZE+1];
+    char client_ip[INET_ADDRSTRLEN];
+
+    inet_ntop(client_addr.sin_family, get_in_addr((struct sockaddr *)&client_addr), client_ip, sizeof(client_ip));
+    syslog(LOG_DEBUG, "Accepted connection from %s\n", client_ip);
+
+    while(!CLOSE_SERVER){
+        ssize_t bytes_read_socket = recv(conn_fd, recv_buf, BUFSIZE, MSG_DONTWAIT);
+        if (bytes_read_socket < 0){
+            if (errno != EAGAIN){
+                syslog(LOG_ERR, "Errors recv(), Error: %s", strerror(errno));
+                thread_func_args->conn_closed = true;
+                break;
+            }
+        }
+        else if (bytes_read_socket == 0){
+            // if recv returns zero, that means the connection has been closed:
+            thread_func_args->conn_closed = true;
+            break;
+        }
+        else{
+            syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, s);
+            // Write to File
+            pthread_mutex_lock(fmutex);
+            size_t nmem_written = fwrite(recv_buf, bytes_read_socket, 1, wptr);
+            if (nmem_written == 0){
+                syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+            }
+            pthread_mutex_unlock(fmutex);
+
+            bool send_file = false;
+            for (int i = 0; i < bytes_read_socket; i++){
+                if (recv_buf[i] == '\n'){
+                    send_file = true;
+                }
+            }
+
+            if (send_file){
+                FILE *rptr = fopen(FILENAME, "r"); // separate pointer for read
+                // send file
+                size_t bytes_to_send = fread(send_buf, 1, BUFSIZE, rptr);
+                while (bytes_to_send > 0){
+                    // Blocking write
+                    ssize_t bytes_sent_socket = sendto(conn_fd, send_buf, bytes_to_send, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+                    if (bytes_sent_socket != bytes_to_send){
+                        syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
+                    }
+                    bytes_to_send = fread(send_buf, 1, BUFSIZE, rptr);
+                }
+                syslog(LOG_DEBUG, "File sent");
+                fclose(rptr);         
+            }
+        }
     }
-    if (signal (SIGTERM, signal_handler) == SIG_ERR) {
-        fprintf (stderr, "Cannot handle SIGTERM!\n");
-        exit(-1);
+
+    // CLOSE CONNECTION
+
+    close(conn_fd);
+    syslog(LOG_DEBUG, "Closed connection from %s\n", client_ip);
+
+    // Remove all completed from list
+    // Write to File
+    pthread_mutex_lock(lmutex);
+    struct entry *np;
+    SLIST_FOREACH(np, &head, entries){
+        if (np-> conn_closed){
+            SLIST_REMOVE(&head, np, entry, entries);
+            // free data
+            free(np);
+        }
     }
+    pthread_mutex_unlock(lmutex);
+    return thread_param;
+}
+
+int main(int argc, char **argv){
+
+
+    
+    int sockfd, conn_fd;
+
+    // Set up signal() --> sigaction()
+    struct sigaction sa;
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     bool RUN_AS_DAEMON = false;
     if (argc >= 2){
@@ -101,10 +194,10 @@ int main(int argc, char **argv)
         syslog(LOG_DEBUG, "Starting server...");
     }
     
-    fptr = fopen(TMPFILE, "w+"); // create file, overwrite if exists, with read and write permission
+    wptr = fopen(FILENAME, "w+"); // create file, overwrite if exists, with read and write permission
 
     // Check if the file was opened successfully
-    if (fptr == NULL) {
+    if (wptr == NULL) {
         syslog(LOG_ERR, "Error opening /var/tmp/aesdsocketdata, Error: %s", strerror(errno));
         closelog();
         exit(-1);
@@ -112,7 +205,7 @@ int main(int argc, char **argv)
 
 	// listen on sock_fd, new connection on conn_fd
 	struct addrinfo hints, *servinfo, *p;
-	struct sockaddr_storage their_addr; // connector's address info
+	struct sockaddr_in their_addr; // connector's address info
 	socklen_t sin_size;
 	int yes=1;
 	int rv;
@@ -160,139 +253,79 @@ int main(int argc, char **argv)
 		exit(-1);
 	}
 
+    pthread_mutex_t fileMutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t listMutex = PTHREAD_MUTEX_INITIALIZER;
+    fmutex = &fileMutex;
+    lmutex = &listMutex;
+
+    SERVER_LISTENING = true;
     printf("server: waiting for connections...\n");
 
-	sin_size = sizeof their_addr;
-	conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-	if (conn_fd == -1) {
-		syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
-		closelog();
-		exit(-1);
-	}
-    int status;
-    status = fcntl(conn_fd, F_SETFL, O_NONBLOCK);
-    if (status == -1){
-        syslog(LOG_ERR, "Failed during fnctl(), Error: %s", strerror(errno));
-		closelog();
-		exit(-1);
-    }
-    CONNECTION_ALIVE = true;
 
-    inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
-    syslog(LOG_DEBUG, "Accepted connection from %s\n", s);
+    while(!CLOSE_SERVER){
+        sin_size = sizeof their_addr;
+        conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
+        if (conn_fd == -1) {
+            syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
+            break;
+        }
+        int status;
+        status = fcntl(conn_fd, F_SETFL, O_NONBLOCK);
+        if (status == -1){
+            syslog(LOG_ERR, "Failed during fnctl(), Error: %s", strerror(errno));
+            break;
+        }
     
-    char recv_buf[BUFSIZE+1];
-    char send_buf[BUFSIZE+1];
-
-	while(1) {  // main loop
-        // connection operations first
-        ssize_t bytes_read_socket = recv(conn_fd, recv_buf, BUFSIZE, MSG_DONTWAIT);
-        if (bytes_read_socket < 0){
-            if (errno != EAGAIN){
-                syslog(LOG_ERR, "Errors recv(), Error: %s", strerror(errno));
-                exit (-1);
-            }
+        // Create Thread
+        struct entry* n1 = (struct entry*) malloc(sizeof(struct entry));
+        if (!n1){
+            syslog(LOG_ERR, "malloc() failed creating new thread arguments, Error: %s", strerror(errno));
+            break;
         }
-        else if (bytes_read_socket == 0){
-            // if recv returns zero, that means the connection has been closed:
-            close(conn_fd);
-            syslog(LOG_DEBUG, "Closed connection from %s\n", s);
-            CONNECTION_ALIVE = false;
 
-            // listen again
-            if (listen(sockfd, BACKLOG) == -1) {
-		        syslog(LOG_ERR, "Failed during listen(), Error: %s", strerror(errno));
-		        closelog();
-		        exit(-1);
-            }
+        n1->conn_fd = conn_fd;
+        n1->conn_closed = false;
+        n1->client_addr = their_addr;
 
-            printf("server: waiting for connections...\n");          
+        // Update Linked List
+        pthread_mutex_lock(lmutex);
+        SLIST_INSERT_HEAD(&head, n1, entries);
+        pthread_mutex_unlock(lmutex);      
+
+        rv = pthread_create(&(n1->tid), NULL, handleRequests, (void*)n1);
+        if (rv != 0){
+            syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
+            CLOSE_SERVER = true;
         }
-        else{
-            syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, s);
 
-            // write to file
-            size_t nmem_written = fwrite(recv_buf, bytes_read_socket, 1, fptr);
-            if (nmem_written == 0){
-                syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
-            }
-            
-            bool send_file = false;
 
-            for (int i = 0; i < bytes_read_socket; i++){
-                if (recv_buf[i] == '\n'){
-                    send_file = true;
-                }
-            }
-            if (send_file){
-                // set fileptr
-                rv = fseek(fptr, 0, SEEK_SET);
-                if (rv == -1){
-                    syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
-                }
-
-                // send file
-                size_t bytes_to_send = fread(send_buf, 1, 1, fptr);
-
-                /*
-                if (ferror(fptr)) {
-                    syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
-                    END_CONNECTION = true;
-                }
-                // reached end of file 
-                else if (feof(fptr)) {
-                    bytes_to_send = bytes_read_file;
-                }
-                */
-                while (bytes_to_send > 0){
-                    // Blocking write
-                    ssize_t bytes_sent_socket = send(conn_fd, send_buf, bytes_to_send, 0);
-                    if (bytes_sent_socket != bytes_to_send){
-                        syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
-                    }
-                    bytes_to_send = fread(send_buf, 1, 1, fptr);
-                }
-                
-                syslog(LOG_DEBUG, "File sent");
-                
-                // reset file pointer
-                rv = fseek(fptr, 0, SEEK_END);
-                if (rv == -1){
-                    syslog(LOG_ERR, "Error with fseek(), Error: %s", strerror(errno));
-                }          
-            }
-        }
-        if (!CONNECTION_ALIVE){
-            sin_size = sizeof their_addr;
-            conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-            if (conn_fd == -1) {
-                syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
-                closelog();
-                exit(-1);
-            }
-            int status;
-            status = fcntl(conn_fd, F_SETFL, O_NONBLOCK);
-            if (status == -1){
-                syslog(LOG_ERR, "Failed during fnctl(), Error: %s", strerror(errno));
-                closelog();
-                exit(-1);
-            }
-            CONNECTION_ALIVE = true;
-        }
-        if (END_CONNECTION){
-            syslog(LOG_DEBUG, "Caught signal, exiting");
-            if (fptr){
-                fclose(fptr);
-            }
-            remove(TMPFILE); // deleting the file /var/tmp/aesdsocketdata.
-            if (CONNECTION_ALIVE){           
-                // closing any open sockets
-                close(conn_fd);
-                syslog(LOG_DEBUG, "Closed connection from %s\n", s);
-            }
-            closelog();
-            exit(0);    
-        }
     }
-	return 0;
+
+    syslog(LOG_DEBUG, "Caught signal, exiting");
+
+    // Close Remaining connections
+    pthread_mutex_lock(lmutex);
+    struct entry *np;
+    SLIST_FOREACH(np, &head, entries){
+        close(np->conn_fd);
+        pthread_join(np->tid, NULL);
+        SLIST_REMOVE(&head, np, entry, entries);
+        // free data
+        free(np);
+    }
+    pthread_mutex_unlock(lmutex);
+
+
+    // Stop reads/writes
+    shutdown(sockfd, SHUT_RDWR);
+    close(sockfd);
+    
+    // close file
+    fclose(wptr);
+    remove(FILENAME);
+
+    syslog(LOG_DEBUG, "Shutting Down Server...");
+    closelog();
+    exit(0);
+
 }
