@@ -38,7 +38,7 @@ Modified by Hyounjun Chang for ECEN5713
 #define BUFSIZE 1024
 
 // Clock
-#define TIME_STR_SIZE 50
+#define TIME_STR_SIZE 100
 
 // Global Variable
 bool CLOSE_SERVER = false;
@@ -491,10 +491,10 @@ int main(int argc, char **argv){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
             }
             while (threadList.head){
-                // wait for handleRequests thread to finish
-                pthread_join(threadList.head->thread, NULL);
                 // close connections
                 close(threadList.head->conn_fd);
+                // wait for handleRequests thread to finish
+                pthread_join(threadList.head->thread, NULL);
                 struct Node_thread *tmpNode = threadList.head;
                 threadList.head = threadList.head->next;
                 free(tmpNode);
@@ -537,6 +537,14 @@ int main(int argc, char **argv){
         // Join threads that completed if there are active connections 
         struct Node_thread* previous = NULL;
         struct Node_thread* current = threadList.head;
+
+        // Update Linked List of Threads
+        rc = pthread_mutex_lock(threadList.mutex);
+        if (rc != 0){
+            syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
+            break;
+        } 
+
         while (current){
             if (current->connection_alive){
                 previous = current;
@@ -561,6 +569,11 @@ int main(int argc, char **argv){
             }
         }
 
+        rc = pthread_mutex_unlock(threadList.mutex);
+        if (rc != 0){
+            syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
+            break;
+        } 
 
     }
 	return 0;
