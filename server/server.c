@@ -79,6 +79,7 @@ void *get_in_addr(struct sockaddr *sa)
 
 void* writeTimeEvery10sec(void* thread_param){
     // Time: from https://man7.org/linux/man-pages/man3/strftime.3.html
+    char timestamp_str[11] = "timestamp:";
     char timestr[TIME_STR_SIZE+1];
     time_t t;
     struct tm *time_tmp;
@@ -110,8 +111,13 @@ void* writeTimeEvery10sec(void* thread_param){
         if (rc != 0){
             syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
         }
+        // write "timestamp:"
+        size_t nmem_written = fwrite(timestamp_str, strlen(timestamp_str), 1, bufferFile.fptr);
+        if (nmem_written == 0){
+            syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+        }
         // write time to file
-        size_t nmem_written = fwrite(timestr, timestr_size+1, 1, bufferFile.fptr);
+        nmem_written = fwrite(timestr, timestr_size+1, 1, bufferFile.fptr);
         if (nmem_written == 0){
             syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
         }
@@ -302,7 +308,6 @@ void* handleRequests(void* thread_param){
 
 
 int main(int argc, char **argv){
-
     // set up global variables;
     threadList.head = NULL;
     current_pid = getpid();
@@ -461,12 +466,11 @@ int main(int argc, char **argv){
 	while(1) {  // main loop
         if (CLOSE_SERVER){
             syslog(LOG_DEBUG, "Caught signal, exiting");
-            
+
             // Close all connections
             rc = pthread_mutex_lock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-                goto stop_accept;
             }
             while (threadList.head){
                 // close connections
@@ -484,40 +488,35 @@ int main(int argc, char **argv){
             rc = pthread_mutex_unlock(threadList.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
-                goto stop_accept;
             }
 
-            stop_accept:
-            // closes acceptRequests() thread
+            // close timer thread
+            pthread_join(timer_thread, NULL);
+            
+            // Stop reads/writes
             shutdown(sockfd, SHUT_RDWR);
             close(sockfd);
             free(threadData);
             pthread_join(accept_thread, NULL);
 
-            // close timer thread
-            pthread_join(timer_thread, NULL);
-
-            // close file
+             // close file
             rc = pthread_mutex_lock(bufferFile.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-                goto close_server;
             }
             if (bufferFile.fptr){
                 fclose(bufferFile.fptr);
+                remove(FILENAME); 
+                syslog(LOG_DEBUG, "File %s destroyed", FILENAME);
             }
             rc = pthread_mutex_unlock(bufferFile.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
-                goto close_server;
             }
-            
-            close_server:
+
             // Delete mutex
             pthread_mutex_destroy(threadList.mutex);
             pthread_mutex_destroy(bufferFile.mutex);
-            remove(FILENAME); 
-            syslog(LOG_DEBUG, "File %s destroyed", FILENAME);
             closelog();
             exit(0);   
         }
