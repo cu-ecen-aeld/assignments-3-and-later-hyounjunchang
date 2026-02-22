@@ -60,38 +60,13 @@ int writeTimeEvery10Sec(void* thread_param);
 void* acceptRequests(void* thread_param);
 void* handleRequests(void* thread_param);
 
-// From Gemini Results
-void daemonize() {
-    pid_t pid = fork();
-
-    if (pid < 0) exit(EXIT_FAILURE); // Error
-    if (pid > 0) exit(EXIT_SUCCESS); // Parent exits
-
-    // Child becomes session leader
-    if (setsid() < 0) exit(EXIT_FAILURE);
-
-    // Fork again to prevent re-acquiring controlling terminal
-    pid = fork();
-    if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) exit(EXIT_SUCCESS);
-
-    // Set permissions, chdir to root, close FDs
-    umask(0);
-    chdir("/");
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
-    open("/dev/null", O_RDWR); // stdin
-    dup(0); // stdout
-    dup(0); // stderr
-}
-
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
 {   
     // SIGPIPE and SIGABRT added for valgrind
-    if (signo == SIGINT || signo == SIGTERM || signo == SIGPIPE || signo == SIGABRT ){
+    if (signo == SIGINT || signo == SIGTERM ){
         CLOSE_SERVER = true;
+        syslog(LOG_DEBUG, "Interrupt received in handler...");
     }
     return;
 }
@@ -211,22 +186,19 @@ void* acceptRequests(void* thread_param){
         syslog(LOG_DEBUG, "Accepted connection from %s\n", client_str);
 
         //Create a new child thread too handle connection
-        struct thread_handleData* threadData = (struct thread_handleData*) malloc(sizeof(struct thread_handleData));
         struct Node_thread* newNodeThread = (struct Node_thread*) malloc(sizeof(struct Node_thread));
-        if (!threadData || !newNodeThread){
+        if (!newNodeThread){
             syslog(LOG_ERR, "malloc() failed creating new thread arguments, Error: %s", strerror(errno));
             CLOSE_SERVER = true;
         }
         else{
             // setup parameters so it can be freed
-            threadData->conn_fd = new_conn_fd;
-            threadData->connection_alive = true;
-            strcpy(threadData->client_addr_str, client_str);
-
-            newNodeThread->paramData = threadData;
+            newNodeThread->conn_fd = new_conn_fd;
+            newNodeThread->connection_alive = true;
+            strcpy(newNodeThread->client_addr_str, client_str);
             newNodeThread->next = NULL;
 
-            rc = pthread_create(&(newNodeThread->thread), NULL, handleRequests, (void*)threadData);
+            rc = pthread_create(&(newNodeThread->thread), NULL, handleRequests, (void*)newNodeThread);
             if (rc != 0){
                 syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
                 CLOSE_SERVER = true;
@@ -256,7 +228,7 @@ void* acceptRequests(void* thread_param){
 
 // handle_requests
 void* handleRequests(void* thread_param){
-    struct thread_handleData* thread_func_args = (struct thread_handleData*) thread_param;
+    struct Node_thread* thread_func_args = (struct Node_thread*) thread_param;
 
     int conn_fd = thread_func_args->conn_fd;
 
@@ -375,14 +347,18 @@ int main(int argc, char **argv){
 
     // Open syslog
     if (RUN_AS_DAEMON){
-        daemonize();
+        if (daemon(0, 0) == -1) {
+            // Log error if daemonization fails
+            perror("daemon() fails");
+            exit(-1);
+        }
         // log as daemon
-        openlog("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_DAEMON);
+        openlog("aesdsocket", LOG_CONS | LOG_PID, LOG_DAEMON);
         syslog(LOG_DEBUG, "Starting server as daemon...");
     }
     else{
         // write to console if no logger, Include PID, no delay, error to console
-        openlog("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY | LOG_PERROR, LOG_USER);
+        openlog("aesdsocket", LOG_CONS | LOG_PID | LOG_PERROR, LOG_USER);
         syslog(LOG_DEBUG, "Starting server...");
     }
     
@@ -518,9 +494,7 @@ int main(int argc, char **argv){
                 // wait for handleRequests thread to finish
                 pthread_join(threadList.head->thread, NULL);
                 // close connections
-                close(threadList.head->paramData->conn_fd);
-                // free data
-                free(threadList.head->paramData);
+                close(threadList.head->conn_fd);
                 struct Node_thread *tmpNode = threadList.head;
                 threadList.head = threadList.head->next;
                 free(tmpNode);
@@ -555,6 +529,7 @@ int main(int argc, char **argv){
             // Delete mutex
             pthread_mutex_destroy(threadList.mutex);
             pthread_mutex_destroy(bufferFile.mutex);
+            syslog(LOG_INFO, "Shutting Down Server...");
             closelog();
             exit(0);   
         }
@@ -563,19 +538,16 @@ int main(int argc, char **argv){
         struct Node_thread* previous = NULL;
         struct Node_thread* current = threadList.head;
         while (current){
-            if (current->paramData->connection_alive){
+            if (current->connection_alive){
                 previous = current;
                 current = current->next;
             }
             else{
                 // close connections
-                close(current->paramData->conn_fd);
+                close(current->conn_fd);
                 // wait for handleRequests thread to finish
                 pthread_join(current->thread, NULL);
-                syslog(LOG_DEBUG, "Close connection with fd: %d", current->paramData->conn_fd);
-
-                // free data
-                free(current->paramData);
+                syslog(LOG_DEBUG, "Close connection with fd: %d", current->conn_fd);
                 if (previous){
                     previous->next = current->next;
                 }
