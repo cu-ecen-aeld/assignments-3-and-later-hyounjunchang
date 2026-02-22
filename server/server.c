@@ -53,6 +53,7 @@ int sockfd;
 void timer_handler(int sig, siginfo_t *si, void *uc);
 void signal_handler (int signo);
 void *get_in_addr(struct sockaddr *sa);
+int printCurrentTime(void);
 int writeTimeEvery10Sec(void* thread_param);
 void* acceptRequests(void* thread_param);
 void* handleRequests(void* thread_param);
@@ -62,8 +63,6 @@ void signal_handler (int signo)
 {
     if (signo == SIGINT || signo == SIGTERM){
         CLOSE_SERVER = true;
-        // send a signal for alarm to terminate
-        kill(current_pid, SIGALRM);
     }
     return;
 }
@@ -77,56 +76,73 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-void* writeTimeEvery10sec(void* thread_param){
+int printCurrentTime(void){
     // Time: from https://man7.org/linux/man-pages/man3/strftime.3.html
     char timestamp_str[11] = "timestamp:";
     char timestr[TIME_STR_SIZE+1];
     time_t t;
     struct tm *time_tmp;
     int rc;
+
+    t = time(NULL);
+    time_tmp = localtime(&t);
+    if (time_tmp == NULL) {
+        syslog(LOG_ERR, "Error getting local time, Error: %s", strerror(errno));
+        return -1;
+    }
+    size_t timestr_size = strftime(timestr, sizeof(timestr), "%a, %d %b %Y %T %z", time_tmp);
+    if (timestr_size == 0) {
+        syslog(LOG_ERR, "Error with strftime(), Error: %s", strerror(errno));
+        return -1;
+    }
+    timestr[timestr_size] = '\n'; // append with newline
+
+    // write time to file
+    rc = pthread_mutex_lock(bufferFile.mutex);
+    if (rc != 0){
+        syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
+        return -1;
+    }
+    // write "timestamp:"
+    size_t nmem_written = fwrite(timestamp_str, strlen(timestamp_str), 1, bufferFile.fptr);
+    if (nmem_written == 0){
+        syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+        return -1;
+    }
+    // write time to file
+    nmem_written = fwrite(timestr, timestr_size+1, 1, bufferFile.fptr);
+    if (nmem_written == 0){
+        syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+        return -1;
+    }
+    rc = pthread_mutex_unlock(bufferFile.mutex);
+    if (rc != 0){
+        syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+void* writeTimeEvery10sec(void* thread_param){
+    struct timespec start, current, target;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    target.tv_sec = start.tv_sec + 10;
+    target.tv_nsec = start.tv_nsec; 
+
     while (1){
+        // return immdiately
         if (CLOSE_SERVER){
             break;
+        }       
+        clock_gettime(CLOCK_MONOTONIC, &current);     
+        if ((current.tv_sec > target.tv_sec) ||
+            (current.tv_sec == target.tv_sec && current.tv_nsec > target.tv_nsec)){
+            target.tv_sec = current.tv_sec + 10; 
+            int rc = printCurrentTime();
+            if (rc != 0){
+                syslog(LOG_ERR,"printCurrentTime() failed, Error: %s", strerror(errno));
+            }
         }
-        unsigned int time_left = sleep(10);
-        while (time_left){
-            // interrupt during sleep
-            if (CLOSE_SERVER)
-                break;
-            time_left = sleep(time_left);
-        }
-        t = time(NULL);
-        time_tmp = localtime(&t);
-        if (time_tmp == NULL) {
-            syslog(LOG_ERR, "Error getting local time, Error: %s", strerror(errno));
-        }
-        size_t timestr_size = strftime(timestr, sizeof(timestr), "%a, %d %b %Y %T %z", time_tmp);
-        if (timestr_size == 0) {
-            syslog(LOG_ERR, "Error with strftime(), Error: %s", strerror(errno));
-        }
-        timestr[timestr_size] = '\n'; // append with newline
-
-        // write time to file
-        rc = pthread_mutex_lock(bufferFile.mutex);
-        if (rc != 0){
-            syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
-        }
-        // write "timestamp:"
-        size_t nmem_written = fwrite(timestamp_str, strlen(timestamp_str), 1, bufferFile.fptr);
-        if (nmem_written == 0){
-            syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
-        }
-        // write time to file
-        nmem_written = fwrite(timestr, timestr_size+1, 1, bufferFile.fptr);
-        if (nmem_written == 0){
-            syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
-        }
-        rc = pthread_mutex_unlock(bufferFile.mutex);
-        if (rc != 0){
-            syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
-        }
-    }
-    
+    }   
     return thread_param;
 }
 
