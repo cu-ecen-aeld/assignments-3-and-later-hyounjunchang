@@ -110,30 +110,33 @@ void* handleRequests(void* thread_param) {
             if (nmem_written == 0){
                 syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
             }
-            pthread_mutex_unlock(fmutex);
-
+            fseek(wptr, 0, SEEK_SET);
+            
             bool send_file = false;
             for (int i = 0; i < bytes_read_socket; i++){
                 if (recv_buf[i] == '\n'){
                     send_file = true;
                 }
             }
-
+            
+            // send file
             if (send_file){
-                FILE *rptr = fopen(FILENAME, "r"); // separate pointer for read
-                // send file
-                size_t bytes_to_send = fread(send_buf, 1, BUFSIZE, rptr);
+                size_t bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
                 while (bytes_to_send > 0){
                     // Blocking write
                     ssize_t bytes_sent_socket = sendto(conn_fd, send_buf, bytes_to_send, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
                     if (bytes_sent_socket != bytes_to_send){
                         syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
                     }
-                    bytes_to_send = fread(send_buf, 1, BUFSIZE, rptr);
+                    else{
+                        syslog(LOG_DEBUG, "Bytes sent: %ld", bytes_to_send);
+                    }
+                    bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
                 }
-                syslog(LOG_DEBUG, "File sent");
-                fclose(rptr);         
             }
+            syslog(LOG_DEBUG, "File sent");
+            fseek(wptr, 0, SEEK_END);
+            pthread_mutex_unlock(fmutex);
         }
     }
 
@@ -267,7 +270,8 @@ int main(int argc, char **argv){
         conn_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
         if (conn_fd == -1) {
             syslog(LOG_ERR, "Failed during accept(), Error: %s", strerror(errno));
-            break;
+            close(sockfd);
+            continue;
         }
         int status;
         status = fcntl(conn_fd, F_SETFL, O_NONBLOCK);
@@ -302,24 +306,6 @@ int main(int argc, char **argv){
     }
 
     syslog(LOG_DEBUG, "Caught signal, exiting");
-
-    // Close Remaining connections
-    pthread_mutex_lock(lmutex);
-    struct entry *np;
-    SLIST_FOREACH(np, &head, entries){
-        close(np->conn_fd);
-        pthread_join(np->tid, NULL);
-        SLIST_REMOVE(&head, np, entry, entries);
-        // free data
-        free(np);
-    }
-    pthread_mutex_unlock(lmutex);
-
-
-    // Stop reads/writes
-    shutdown(sockfd, SHUT_RDWR);
-    close(sockfd);
-    
     // close file
     fclose(wptr);
     remove(FILENAME);
