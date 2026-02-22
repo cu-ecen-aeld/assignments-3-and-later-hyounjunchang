@@ -24,14 +24,27 @@ Modified by Hyounjun Chang for ECEN5713
 #include "server.h"
 #include <pthread.h>
 
+#include <time.h>
+#include <stdint.h>
+
+
 
 #define PORT "9000"  // the port users will be connecting to
 #define BACKLOG 10     // how many pending connections queue holds
+
+// File transfer
 #define FILENAME "/var/tmp/aesdsocketdata"
 #define BUFSIZE 1024
 
+// Clock
+#define TIME_STR_SIZE 50
+#define CLOCKID CLOCK_REALTIME
+#define SIGNO_ALARM SIGRTMIN
+
+
 // Global Variable
 bool CLOSE_SERVER = false;
+bool WRITE_TIME = false;
 
 // structs with mutex
 struct linkedList_thread threadList;
@@ -39,10 +52,21 @@ struct fileHandler bufferFile;
 
 int sockfd;
 
+void timer_handler(int sig, siginfo_t *si, void *uc);
 void signal_handler (int signo);
 void *get_in_addr(struct sockaddr *sa);
+int writeTime(void);
+int setupTimer(time_t sec);
 void* acceptRequests(void* thread_param);
 void* handleRequests(void* thread_param);
+
+void timer_handler(int sig, siginfo_t *si, void *uc)
+{   
+    if (sig == SIGNO_ALARM){
+        WRITE_TIME = true;
+    }
+    return;
+}
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
@@ -61,6 +85,102 @@ void *get_in_addr(struct sockaddr *sa)
     }
 
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+int writeTime(void){
+    // Time: from https://man7.org/linux/man-pages/man3/strftime.3.html
+    char timestr[TIME_STR_SIZE+1];
+    time_t t;
+    struct tm *time_tmp;
+    int rc;
+    int retval = 0;
+    
+    t = time(NULL);
+    time_tmp = localtime(&t);
+    if (time_tmp == NULL) {
+        syslog(LOG_ERR, "Error getting local time, Error: %s", strerror(errno));
+        retval = -1;
+    }
+    size_t timestr_size = strftime(timestr, sizeof(timestr), "%a, %d %b %Y %T %z", time_tmp);
+    if (timestr_size == 0) {
+        syslog(LOG_ERR, "Error with strftime(), Error: %s", strerror(errno));
+        retval = -1;
+    }
+    timestr[timestr_size] = '\n'; // append with newline
+
+    // write time to file
+    rc = pthread_mutex_lock(bufferFile.mutex);
+    if (rc != 0){
+        syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
+        retval = -1;
+    }
+    // write time to file
+    size_t nmem_written = fwrite(timestr, timestr_size+1, 1, bufferFile.fptr);
+    if (nmem_written == 0){
+        syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+        retval = -1;
+    }
+    rc = pthread_mutex_unlock(bufferFile.mutex);
+    if (rc != 0){
+        syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
+        retval = -1;
+    }
+    return retval;
+}
+
+// Mostly copied from: https://man7.org/linux/man-pages/man2/timer_create.2.html
+int setupTimer(time_t sec){
+    timer_t            timerid;
+    sigset_t           mask;
+    struct sigevent    sev;
+    struct sigaction   sa;
+    struct itimerspec  its;
+
+    /* Establish handler for timer signal.  */
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = timer_handler;
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGNO_ALARM, &sa, NULL) == -1){
+        syslog(LOG_ERR, "Failed during sigaction() for timer, Error: %s", strerror(errno));
+        return -1;
+    }
+
+    /* Block timer signal temporarily.  */
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGNO_ALARM);
+    if (sigprocmask(SIG_SETMASK, &mask, NULL) == -1){
+        syslog(LOG_ERR, "Failed during sigprocmask() for timer, Error: %s", strerror(errno));
+        return -1;
+    }
+    
+    /* Create the timer.  */
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGNO_ALARM; // signal generated
+    sev.sigev_value.sival_ptr = &timerid;
+    if (timer_create(CLOCKID, &sev, &timerid) == -1){
+        syslog(LOG_ERR, "Failed during timer_create(), Error: %s", strerror(errno));
+        return -1;
+    }
+
+    /* Start the timer.  */
+    its.it_value.tv_sec = sec;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+    if (timer_settime(timerid, 0, &its, NULL) == -1){
+        syslog(LOG_ERR, "Failed during timer_settime(): %s", strerror(errno));
+        return -1;
+    }
+
+    /* Unlock the timer signal, so that timer notification
+              can be delivered.  */
+    if (sigprocmask(SIG_UNBLOCK, &mask, NULL) == -1){
+        syslog(LOG_ERR, "Failed during sigprocmask(): %s", strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 void* acceptRequests(void* thread_param){
@@ -359,6 +479,17 @@ int main(int argc, char **argv){
         exit(-1);
     }
 
+    // Setup 10 second timer
+    rc = setupTimer(10);
+    if (rc != 0){
+        syslog(LOG_ERR, "setupTimer() failed, Error: %s", strerror(errno));
+        close(sockfd);
+        closelog();
+        pthread_mutex_destroy(threadList.mutex);
+        pthread_mutex_destroy(bufferFile.mutex);
+        exit(-1);
+    }
+   
     pthread_t accept_thread; 
 
     //Create a new child thread too handle connection
@@ -445,14 +576,17 @@ int main(int argc, char **argv){
             exit(0);   
         }
 
+        if (WRITE_TIME){
+            rc = writeTime();
+            if (rc != 0)
+                syslog(LOG_ERR, "writeTime() failed, Error: %s", strerror(errno));
+            WRITE_TIME = false;
+        }
 
-        // TODO: Join threads that completed 
-        // there are active connections 
+        // Join threads that completed if there are active connections 
         struct Node_thread* previous = NULL;
         struct Node_thread* current = threadList.head;
-        
         while (current){
-            
             if (current->paramData->connection_alive){
                 previous = current;
                 current = current->next;
