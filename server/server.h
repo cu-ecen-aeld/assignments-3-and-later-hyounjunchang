@@ -1,30 +1,9 @@
-// Reusing some components from threading.h
-#include <stdbool.h>
-#include <pthread.h>
-
-#include <netinet/in.h>
-
-// Holds thread and its parameters
-struct Node_thread{
+#include <sys/queue.h>
+// from https://man.archlinux.org/man/core/man-pages/SLIST_INIT.3.en
+struct entry {
     pthread_t thread;
     int conn_fd;
-    bool connection_alive;
+    bool connection_closed;
     char client_addr_str[INET6_ADDRSTRLEN];
-    struct Node_thread* next;
-};
-
-// Parameters for acceptRequests()
-struct thread_acceptData{
-    int sockfd;
-};
-
-// Structs with mutex for thread-safety
-struct linkedList_thread{
-    struct Node_thread* head;
-    pthread_mutex_t* mutex;
-};
-
-struct fileHandler{
-    FILE *fptr;
-    pthread_mutex_t* mutex;
+    SLIST_ENTRY(entry) entries;             /* Singly linked list */
 };
