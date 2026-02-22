@@ -88,8 +88,9 @@ void daemonize() {
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
-{
-    if (signo == SIGINT || signo == SIGTERM){
+{   
+    // SIGPIPE and SIGABRT added for valgrind
+    if (signo == SIGINT || signo == SIGTERM || signo == SIGPIPE || signo == SIGABRT ){
         CLOSE_SERVER = true;
     }
     return;
@@ -135,12 +136,14 @@ int printCurrentTime(void){
     size_t nmem_written = fwrite(timestamp_str, strlen(timestamp_str), 1, bufferFile.fptr);
     if (nmem_written == 0){
         syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+        rc = pthread_mutex_unlock(bufferFile.mutex);
         return -1;
     }
     // write time to file
     nmem_written = fwrite(timestr, timestr_size+1, 1, bufferFile.fptr);
     if (nmem_written == 0){
         syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+        rc = pthread_mutex_unlock(bufferFile.mutex);
         return -1;
     }
     rc = pthread_mutex_unlock(bufferFile.mutex);
@@ -212,10 +215,7 @@ void* acceptRequests(void* thread_param){
         struct Node_thread* newNodeThread = (struct Node_thread*) malloc(sizeof(struct Node_thread));
         if (!threadData || !newNodeThread){
             syslog(LOG_ERR, "malloc() failed creating new thread arguments, Error: %s", strerror(errno));
-            if(threadData)
-                free(threadData);
-            if(newNodeThread)
-                free(newNodeThread);
+            CLOSE_SERVER = true;
         }
         else{
             // setup parameters so it can be freed
@@ -229,8 +229,7 @@ void* acceptRequests(void* thread_param){
             rc = pthread_create(&(newNodeThread->thread), NULL, handleRequests, (void*)threadData);
             if (rc != 0){
                 syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
-                free(threadData);
-                free(newNodeThread);
+                CLOSE_SERVER = true;
             }
 
             // Update Linked List of Threads
@@ -507,6 +506,9 @@ int main(int argc, char **argv){
         if (CLOSE_SERVER){
             syslog(LOG_DEBUG, "Caught signal, exiting");
 
+            // close timer thread
+            pthread_join(timer_thread, NULL);
+
             // Close all connections
             rc = pthread_mutex_lock(threadList.mutex);
             if (rc != 0){
@@ -530,25 +532,21 @@ int main(int argc, char **argv){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
             }
 
-            // close timer thread
-            pthread_join(timer_thread, NULL);
-            
             // Stop reads/writes
             shutdown(sockfd, SHUT_RDWR);
             close(sockfd);
             free(threadData);
             pthread_join(accept_thread, NULL);
 
-             // close file
+            // close file
             rc = pthread_mutex_lock(bufferFile.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
             }
-            if (bufferFile.fptr){
-                fclose(bufferFile.fptr);
-                remove(FILENAME); 
-                syslog(LOG_DEBUG, "File %s destroyed", FILENAME);
-            }
+            fclose(bufferFile.fptr);
+            remove(FILENAME); 
+            syslog(LOG_DEBUG, "File %s destroyed", FILENAME);
+
             rc = pthread_mutex_unlock(bufferFile.mutex);
             if (rc != 0){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
