@@ -139,7 +139,7 @@ void* handleRequests(void* thread_param) {
     inet_ntop(client_addr.sin_family, get_in_addr((struct sockaddr *)&client_addr), client_ip, sizeof(client_ip));
     syslog(LOG_DEBUG, "Accepted connection from %s\n", client_ip);
 
-    while(!CLOSE_SERVER){
+    while(!CLOSE_SERVER || !thread_func_args->conn_closed){
         ssize_t bytes_read_socket = recv(conn_fd, recv_buf, BUFSIZE, MSG_DONTWAIT);
         if (bytes_read_socket < 0){
             if (errno != EAGAIN){
@@ -157,6 +157,8 @@ void* handleRequests(void* thread_param) {
             syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, client_ip);
             // Write to File
             pthread_mutex_lock(fmutex);
+            fseek(wptr, 0, SEEK_END);
+
             size_t nmem_written = fwrite(recv_buf, bytes_read_socket, 1, wptr);
             if (nmem_written == 0){
                 syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
@@ -341,7 +343,19 @@ int main(int argc, char **argv){
     syslog(LOG_DEBUG, "Caught signal, exiting");
     
     pthread_join(timerthread, NULL);
-    // other threads end on their own and removed linekd list and frees
+
+    // Remove all completed from list
+    // Write to File
+    pthread_mutex_lock(lmutex);
+    struct entry *np;
+    SLIST_FOREACH(np, &head, entries){
+        pthread_join(np->tid, NULL); // socket is close by the threadd at the end of function, so only need to join
+        SLIST_REMOVE(&head, np, entry, entries);
+        // free data
+        free(np);
+    }
+    pthread_mutex_unlock(lmutex);
+
 
     // close file
     fclose(wptr);
