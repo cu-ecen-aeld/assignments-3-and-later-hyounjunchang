@@ -25,6 +25,7 @@ Modified by Hyounjun Chang for ECEN5713
 #define BACKLOG 10     // how many pending connections queue holds
 #define FILENAME "/var/tmp/aesdsocketdata"
 #define BUFSIZE 2048
+#define TIME_STR_SIZE 100
 
 #include <pthread.h>
 #include "server.h"
@@ -71,6 +72,57 @@ void *get_in_addr(struct sockaddr *sa)
     }
 
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+void* writeTimeEvery10sec(void* thread_param){
+    struct timespec start, current, target;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    target.tv_sec = start.tv_sec + 10;
+    target.tv_nsec = start.tv_nsec; 
+
+    while (!CLOSE_SERVER){
+        clock_gettime(CLOCK_MONOTONIC, &current);     
+        if ((current.tv_sec > target.tv_sec) ||
+            (current.tv_sec == target.tv_sec && current.tv_nsec > target.tv_nsec)){
+            target.tv_sec = current.tv_sec + 10; 
+            
+            // Print current time:
+            // Time: from https://man7.org/linux/man-pages/man3/strftime.3.html
+            char timestr[TIME_STR_SIZE+1];
+            time_t t;
+            struct tm *time_tmp;
+            int rc;
+
+            t = time(NULL);
+            time_tmp = localtime(&t);
+            if (time_tmp == NULL) {
+                syslog(LOG_ERR, "Error getting local time, Error: %s", strerror(errno));
+            }
+            size_t timestr_size = strftime(timestr, sizeof(timestr), "timestamp: %a, %d %b %Y %T %z", time_tmp);
+            if (timestr_size == 0) {
+                syslog(LOG_ERR, "Error with strftime(), Error: %s", strerror(errno));
+            }
+            timestr[timestr_size] = '\n'; // append with newline
+
+            // write time to file
+            rc = pthread_mutex_lock(fmutex);
+            if (rc != 0){
+                syslog(LOG_ERR,"pthread_mutex_lock() failed, Error: %s", strerror(errno));
+            }
+            fseek(wptr, 0, SEEK_END);
+            // write time to file
+            size_t nmem_written = fwrite(timestr, timestr_size+1, 1, wptr);
+            if (nmem_written == 0){
+                syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+            }
+
+            rc = pthread_mutex_unlock(fmutex);
+            if (rc != 0){
+                syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
+            }
+        }
+    }   
+    return thread_param;
 }
 
 void* handleRequests(void* thread_param) {
@@ -133,19 +185,6 @@ void* handleRequests(void* thread_param) {
     // CLOSE CONNECTION
     close(conn_fd);
     syslog(LOG_DEBUG, "Closed connection from %s\n", client_ip);
-
-    // Remove all completed from list
-    // Write to File
-    pthread_mutex_lock(lmutex);
-    struct entry *np;
-    SLIST_FOREACH(np, &head, entries){
-        if (np-> conn_closed){
-            SLIST_REMOVE(&head, np, entry, entries);
-            // free data
-            free(np);
-        }
-    }
-    pthread_mutex_unlock(lmutex);
     return thread_param;
 }
 
@@ -253,6 +292,13 @@ int main(int argc, char **argv){
     SERVER_LISTENING = true;
     printf("server: waiting for connections...\n");
 
+    pthread_t timerthread;
+    rv = pthread_create(&timerthread, NULL, writeTimeEvery10sec, NULL);
+    if (rv != 0){
+        syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
+        CLOSE_SERVER = true;
+    }
+
 
     while(!CLOSE_SERVER){
         sin_size = sizeof their_addr;
@@ -290,11 +336,13 @@ int main(int argc, char **argv){
             syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
             CLOSE_SERVER = true;
         }
-
-
     }
 
     syslog(LOG_DEBUG, "Caught signal, exiting");
+    
+    pthread_join(timerthread, NULL);
+    // other threads end on their own and removed linekd list and frees
+
     // close file
     fclose(wptr);
     remove(FILENAME);
