@@ -42,7 +42,6 @@ pthread_mutex_t *lmutex;
 
 // for SIGINT termination (since using single-thread)
 FILE *wptr;
-char s[INET6_ADDRSTRLEN];
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
@@ -103,7 +102,7 @@ void* handleRequests(void* thread_param) {
             break;
         }
         else{
-            syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, s);
+            syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, client_ip);
             // Write to File
             pthread_mutex_lock(fmutex);
             size_t nmem_written = fwrite(recv_buf, bytes_read_socket, 1, wptr);
@@ -111,37 +110,27 @@ void* handleRequests(void* thread_param) {
                 syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
             }
             fseek(wptr, 0, SEEK_SET);
-            
-            bool send_file = false;
-            for (int i = 0; i < bytes_read_socket; i++){
-                if (recv_buf[i] == '\n'){
-                    send_file = true;
+
+            size_t bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
+            syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
+            while (bytes_to_send > 0){
+                // Blocking write
+                ssize_t bytes_sent_socket = sendto(conn_fd, send_buf, bytes_to_send, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+                if (bytes_sent_socket != bytes_to_send){
+                    syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
                 }
-            }
-            
-            // send file
-            if (send_file){
-                size_t bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
-                while (bytes_to_send > 0){
-                    // Blocking write
-                    ssize_t bytes_sent_socket = sendto(conn_fd, send_buf, bytes_to_send, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-                    if (bytes_sent_socket != bytes_to_send){
-                        syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
-                    }
-                    else{
-                        syslog(LOG_DEBUG, "Bytes sent: %ld", bytes_to_send);
-                    }
-                    bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
+                else{
+                    syslog(LOG_DEBUG, "Bytes sent: %ld", bytes_to_send);
                 }
+                bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
+                syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
             }
             syslog(LOG_DEBUG, "File sent");
-            fseek(wptr, 0, SEEK_END);
             pthread_mutex_unlock(fmutex);
         }
+        
     }
-
     // CLOSE CONNECTION
-
     close(conn_fd);
     syslog(LOG_DEBUG, "Closed connection from %s\n", client_ip);
 
