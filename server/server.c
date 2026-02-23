@@ -121,6 +121,7 @@ void* writeTimeEvery10sec(void* thread_param){
                 syslog(LOG_ERR,"pthread_mutex_unlock() failed, Error: %s", strerror(errno));
             }
         }
+        sleep (1); // so it doesn't spin lock
     }   
     return thread_param;
 }

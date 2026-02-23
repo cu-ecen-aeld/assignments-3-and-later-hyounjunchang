@@ -1,0 +1,14 @@
+Notes to remember for Assignment 6: 
+You can kill a process like this
+Make sure to kill aesdsocket and valgrind before starting, they may be in the background
+the full-test.sh script isn't always clean
+
+# Source - https://stackoverflow.com/a/3510850
+# Posted by paxdiablo, modified by community. See post 'Timeline' for change history
+# Retrieved 2026-02-22, License - CC BY-SA 4.0
+kill $(ps aux | grep '[a]esdsocket' | awk '{print $2}')
+kill $(ps aux | grep '[v]algrind' | awk '{print $2}')
+
+If that isn't enough (ie. valgrind is stuck), 
+call with kill -9 to send SIGKILL
+kill -9 $(ps aux | grep '[a]esdsocket' | awk '{print $2}')
