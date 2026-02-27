@@ -6,18 +6,16 @@ all: aesdsocket
 #CROSS_COMPILE := aarch64-none-linux-gnu-
 CROSS_COMPILE :=
 
-CC := gcc
-CFLAGS := -Wall -Werror
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -g -Wall -Werror
+TARGET ?= aesdsocket
+LDFLAGS ?= -lpthread -lrt
 
 # Automatic Variables https://makefiletutorial.com/#automatic-variables-and-wildcards
 # Conditinals https://makefiletutorial.com/#conditional-part-of-makefiles
 aesdsocket: server.c
-ifdef CROSS_COMPILE
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $^ -o $@
-endif
-ifndef CROSS_COMPILE
-	$(CC) $(CFLAGS) $^ -o $@
-endif
+	$(CC) $(CFLAGS) $^ -o $@ $(INCLUDES) $(LDFLAGS)
+
 
 clean: 
 	rm -f *.o aesdsocket
