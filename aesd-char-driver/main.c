@@ -21,7 +21,9 @@
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
+#include <linux/slab.h> // kfree kmalloc
+
+MODULE_AUTHOR("Hyounjun Chang");
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
@@ -105,6 +107,11 @@ int aesd_init_module(void)
     /**
      * TODO: initialize the AESD specific portion of the device
      */
+    aesd_device.curr_input_size = 0;
+    aesd_device.write_index = 0;
+    aesd_device.read_index = 0;
+    aesd_device.read_offset = 0;
+    aesd_device.full = false;
 
     result = aesd_setup_cdev(&aesd_device);
 
@@ -118,12 +125,28 @@ int aesd_init_module(void)
 void aesd_cleanup_module(void)
 {
     dev_t devno = MKDEV(aesd_major, aesd_minor);
+    int i;
 
     cdev_del(&aesd_device.cdev);
 
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
+
+    if (aesd_device.full){
+        for (i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++){
+            kfree(aesd_device.entry[i]);
+        }
+    }
+    else{
+        // since device not full, out_off != in_off unless empty
+        for (i = aesd_device.read_index; i != aesd_device.write_index; i++){
+            if (i > AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED){
+                i = i % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+            }
+            kfree(aesd_device.entry[i]);
+        }
+    }
 
     unregister_chrdev_region(devno, 1);
 }
