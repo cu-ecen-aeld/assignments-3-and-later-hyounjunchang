@@ -27,7 +27,7 @@
 struct aesd_buffer_entry
 {
     const char *buffptr;
-    ssize_t size;
+    size_t size;
 };
 
 struct aesd_dev
@@ -41,7 +41,7 @@ struct aesd_dev
     struct aesd_buffer_entry curr_input;
 
     uint8_t out_offs;
-    ssize_t read_start_index;
+    size_t read_start_index;
     uint8_t in_offs;
 
     bool full;
