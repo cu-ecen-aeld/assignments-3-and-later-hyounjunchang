@@ -23,9 +23,17 @@ Modified by Hyounjun Chang for ECEN5713
 
 #define PORT "9000"  // the port users will be connecting to
 #define BACKLOG 10     // how many pending connections queue holds
-#define FILENAME "/var/tmp/aesdsocketdata"
+
 #define BUFSIZE 2048
 #define TIME_STR_SIZE 100
+
+#define USE_AESD_CHAR_DEVICE 1
+
+#ifdef USE_AESD_CHAR_DEVICE
+#define FILENAME "/dev/aesdchar"
+#else
+#define FILENAME "/var/tmp/aesdsocketdata"
+#endif
 
 #include <pthread.h>
 #include "server.h"
@@ -56,7 +64,9 @@ void signal_handler (int signo)
             if (wptr){
                 fclose(wptr);
             }
-            remove(FILENAME); // deleting the file /var/tmp/aesdsocketdata.
+            #ifndef USE_AESD_CHAR_DEVICE
+            remove(FILENAME);
+            #endif
             closelog();
             exit(0); 
         }
@@ -360,7 +370,9 @@ int main(int argc, char **argv){
 
     // close file
     fclose(wptr);
+    #ifndef USE_AESD_CHAR_DEVICE
     remove(FILENAME);
+    #endif
 
     syslog(LOG_DEBUG, "Shutting Down Server...");
     closelog();
