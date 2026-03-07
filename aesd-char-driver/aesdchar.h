@@ -24,6 +24,12 @@
 #  define PDEBUG(fmt, args...) /* not debugging: nothing */
 #endif
 
+struct aesd_buffer_entry
+{
+    const char *buffptr;
+    ssize_t size;
+};
+
 struct aesd_dev
 {
     /**
@@ -31,18 +37,15 @@ struct aesd_dev
      */
     struct cdev cdev;     /* Char device structure      */
 
-    char* entry[AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED];
-    char* curr_input;
-    size_t curr_input_size;
+    struct aesd_buffer_entry entry[AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED];
+    struct aesd_buffer_entry curr_input;
 
-    uint8_t read_index;
-    size_t read_offset;
-    uint8_t write_index;
+    uint8_t out_offs;
+    ssize_t read_start_index;
+    uint8_t in_offs;
 
     bool full;
 
     struct semaphore *sem; // locking structure
 };
-
-
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */
