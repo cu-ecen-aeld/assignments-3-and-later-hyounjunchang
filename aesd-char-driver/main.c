@@ -89,7 +89,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     kernel_buf = kmalloc(count, GFP_KERNEL);
     if (kernel_buf == NULL){
         PDEBUG("kmalloc error");
-        retval = -EFAULT;
+        retval = -ENOMEM;
         goto out;
     }
 
@@ -103,10 +103,10 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     }
     
    
+    // first start_char_index is given from ased_dev_find_entry_offset_for_fpos, rest are always 0
     while (bytes_read < count){
-
-        // reached end of pointer
-        if (buf_index == dev->in_offs){
+        // reached end of pointer, device is not full
+        if (buf_index == dev->in_offs && dev->full == false){
             goto copy_to_userspace;
         }
 
@@ -129,14 +129,19 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             bytes_read = count;
             buf_index = (buf_index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
             end_char_index = 0;
+
+            dev->full = false;
             goto copy_to_userspace;
         }
         else{
             memcpy(kernel_buf+bytes_read, dev->entry[buf_index].buffptr+start_char_index, bytes_left_curr_entry);
+
             start_char_index = 0;
             buf_index = (buf_index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
             end_char_index = 0;
+
             bytes_read += bytes_left_curr_entry;
+            dev->full = false;
         }
     }
 
@@ -168,16 +173,80 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 {
     ssize_t retval = -ENOMEM;
     struct aesd_dev *dev;
+    char* new_buf;
+    size_t curr_size, new_bufsize;
+    int i;
+
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
     /**
      * TODO: handle write
      */
-    
-    
     dev = filp->private_data;
     //acquire mutex
     down(dev->sem);
 
+    // we ignore f_pos for this assignment, and write to buffer
+    curr_size = dev->curr_input.size;
+    new_bufsize = curr_size + count;
+
+    new_buf = kmalloc(new_bufsize, GFP_KERNEL);
+
+    if (new_buf == NULL){
+        PDEBUG("kmalloc error");
+        retval = -ENOMEM;
+        goto out;
+    }
+
+    // copy existing buffer to new one
+    if (curr_size){
+        memcpy(new_buf, dev->curr_input.buffptr, curr_size);
+        kfree(dev->curr_input.buffptr);
+        dev->curr_input.buffptr = new_buf;
+    }
+    
+    
+    // iterate through each byte received
+    for (i = 0; i < count; i++){
+        dev->curr_input.buffptr[curr_size] = buf[i];
+        dev->curr_input.size = dev->curr_input.size + 1;
+
+        if (buf[i] == '\n'){
+            // calculate new in_off
+            uint8_t new_dev_in_offs = (dev->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+
+            // entry is full
+            if (dev->full){
+                dev->out_offs = (dev->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+                kfree(dev->entry[dev->in_offs].buffptr);
+            }
+            // buffer full with new entry
+            else if (new_dev_in_offs == dev->out_offs){
+                dev->full = true;
+            }
+
+            // update entry
+            dev->entry[dev->in_offs].buffptr = dev->curr_input.buffptr;
+            dev->entry[dev->in_offs].size =  dev->curr_input.size;
+            dev->in_offs = new_dev_in_offs;
+
+            // update current input
+            dev->curr_input.buffptr = NULL;
+            dev->curr_input.size = 0;
+
+            // create new memory
+            new_bufsize = count - i;
+            new_buf = kmalloc(new_bufsize, GFP_KERNEL);
+            if (new_buf == NULL){
+                PDEBUG("kmalloc error, partial write done");
+                retval = (i+1);
+                goto out;
+            }
+            dev->curr_input.buffptr = new_buf;
+        }
+
+    }
+    
+    out:
     //release mutex
     up(dev->sem);
     return retval;

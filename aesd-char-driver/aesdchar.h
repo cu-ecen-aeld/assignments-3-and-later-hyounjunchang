@@ -26,7 +26,7 @@
 
 struct aesd_buffer_entry
 {
-    const char *buffptr;
+    char *buffptr;
     size_t size;
 };
 
