@@ -2,6 +2,9 @@
 Referenced from
 - https://beej.us/guide/bgnet/source/examples/server.c
 Modified by Hyounjun Chang for ECEN5713
+
+For Assignment 8: Claude AI was used to debug
+https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
 */
 
 #include <stdio.h>
@@ -51,6 +54,7 @@ pthread_mutex_t *lmutex;
 
 // for SIGINT termination (since using single-thread)
 FILE *wptr;
+int write_fd;
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
@@ -168,6 +172,38 @@ void* handleRequests(void* thread_param) {
             syslog(LOG_DEBUG, "%ld bytes received from %s", bytes_read_socket, client_ip);
             // Write to File
             pthread_mutex_lock(fmutex);
+
+            #ifdef USE_AESD_CHAR_DEVICE
+
+            ssize_t nmem_written = write(write_fd, recv_buf, bytes_read_socket);
+            if (nmem_written < 0){
+                syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
+            }
+            
+            int local_read_fd = open(FILENAME, O_RDONLY);
+            if (local_read_fd < 0) {
+                syslog(LOG_ERR, "Error opening device for read: %s", strerror(errno));
+                pthread_mutex_unlock(fmutex);
+                continue;
+            }
+            ssize_t bytes_to_send = read(local_read_fd, send_buf, BUFSIZE);
+
+
+            syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
+            while (bytes_to_send > 0){
+                ssize_t bytes_sent_socket = sendto(conn_fd, send_buf, bytes_to_send, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+                if (bytes_sent_socket != bytes_to_send){
+                    syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
+                }
+                else{
+                    syslog(LOG_DEBUG, "Bytes sent: %ld", bytes_to_send);
+                }
+                bytes_to_send = read(local_read_fd, send_buf, BUFSIZE);
+                syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
+            }
+
+            close(local_read_fd);
+            #else
             fseek(wptr, 0, SEEK_END);
 
             size_t nmem_written = fwrite(recv_buf, bytes_read_socket, 1, wptr);
@@ -190,6 +226,7 @@ void* handleRequests(void* thread_param) {
                 bytes_to_send = fread(send_buf, 1, BUFSIZE, wptr);
                 syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
             }
+            #endif
             syslog(LOG_DEBUG, "File sent");
             pthread_mutex_unlock(fmutex);
         }
@@ -202,9 +239,6 @@ void* handleRequests(void* thread_param) {
 }
 
 int main(int argc, char **argv){
-
-
-    
     int sockfd, conn_fd;
 
     // Set up signal() --> sigaction()
@@ -238,14 +272,28 @@ int main(int argc, char **argv){
         syslog(LOG_DEBUG, "Starting server...");
     }
     
-    wptr = fopen(FILENAME, "w+"); // create file, overwrite if exists, with read and write permission
-
-    // Check if the file was opened successfully
-    if (wptr == NULL) {
-        syslog(LOG_ERR, "Error opening /var/tmp/aesdsocketdata, Error: %s", strerror(errno));
+    // opening file
+    #ifdef USE_AESD_CHAR_DEVICE 
+    write_fd = open(FILENAME, O_WRONLY);
+    if (write_fd < 0) {
+        syslog(LOG_ERR, "Error opening %s: %s", FILENAME, strerror(errno));
         closelog();
         exit(-1);
     }
+    #else
+    wptr = fopen(FILENAME, "w+"); // create file, overwrite if exists, with read and write permission
+    #endif
+    syslog (LOG_DEBUG, "Opening file: %s", FILENAME);
+
+
+    // Check if the file was opened successfully
+    #ifndef USE_AESD_CHAR_DEVICE
+    if (wptr == NULL) {
+        syslog(LOG_ERR, "Error opening %s, Error: %s", FILENAME, strerror(errno));
+        closelog();
+        exit(-1);
+    }
+    #endif
 
 	// listen on sock_fd, new connection on conn_fd
 	struct addrinfo hints, *servinfo, *p;
@@ -373,9 +421,11 @@ int main(int argc, char **argv){
 
 
     // close file
-    fclose(wptr);
     #ifndef USE_AESD_CHAR_DEVICE
+    fclose(wptr);
     remove(FILENAME);
+    #else
+    close(write_fd);
     #endif
 
     syslog(LOG_DEBUG, "Shutting Down Server...");
