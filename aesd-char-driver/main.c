@@ -11,6 +11,8 @@
  *
  */
 
+// Claude AI chat history: https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
+
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/printk.h>
@@ -118,12 +120,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         if (bytes_read + bytes_left_curr_entry > count){
             memcpy(kernel_buf+bytes_read, dev->entry[buf_index].buffptr+start_char_index, count-bytes_read);
             
-            bytes_read = count;
             end_char_index = start_char_index + (count - bytes_read);
+            bytes_read = count;
             goto copy_to_userspace;
         }
         // currenty entry fully read, end of read
-        else if (bytes_read + bytes_left_curr_entry == 0){
+        else if (bytes_read + bytes_left_curr_entry == count){
             memcpy(kernel_buf+bytes_read, dev->entry[buf_index].buffptr+start_char_index, bytes_left_curr_entry);
 
             bytes_read = count;
@@ -146,7 +148,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     }
 
     copy_to_userspace:
-    retval = copy_to_user(buf, kernel_buf, bytes_read);
+    // FIXED: copy_to_user returns bytes NOT copied (0 on success)
+    retval = bytes_read;
+    if (copy_to_user(buf, kernel_buf, bytes_read)) {
+        retval = -EFAULT;
+    }
+
     PDEBUG("copy_to_user for read: %zu bytes", retval);
 
     // update dev structure
@@ -154,7 +161,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     dev->read_start_index = end_char_index;
 
     // update fpos
-    for (i = 0; i < buf_index; i++){
+    for (i = dev->out_offs; i != buf_index; i = (i+1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED){
         new_fpos += dev->entry[i].size;
     }
     new_fpos += end_char_index;
@@ -201,19 +208,23 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     if (curr_size){
         memcpy(new_buf, dev->curr_input.buffptr, curr_size);
         kfree(dev->curr_input.buffptr);
-        dev->curr_input.buffptr = new_buf;
+    }
+    dev->curr_input.buffptr = new_buf;
+
+    if (copy_from_user(new_buf+curr_size, buf, count)) {
+        retval = -EFAULT;
+        goto out;
     }
     
     
     // iterate through each byte received
     for (i = 0; i < count; i++){
-        dev->curr_input.buffptr[curr_size] = buf[i];
-        dev->curr_input.size = dev->curr_input.size + 1;
+        curr_size++;
 
-        if (buf[i] == '\n'){
+        if (new_buf[curr_size] == '\n'){
             // calculate new in_off
             uint8_t new_dev_in_offs = (dev->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-
+            
             // entry is full
             if (dev->full){
                 dev->out_offs = (dev->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
@@ -225,8 +236,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             }
 
             // update entry
-            dev->entry[dev->in_offs].buffptr = dev->curr_input.buffptr;
-            dev->entry[dev->in_offs].size =  dev->curr_input.size;
+            dev->entry[dev->in_offs].buffptr = new_buf;
+            dev->entry[dev->in_offs].size = curr_size;
             dev->in_offs = new_dev_in_offs;
 
             // update current input
@@ -245,6 +256,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         }
 
     }
+    dev->entry[dev->in_offs].buffptr = new_buf;
+    dev->entry[dev->in_offs].size = curr_size;
+    retval = count;
     
     out:
     //release mutex
@@ -388,13 +402,12 @@ void free_all_aesd_dev_buffer(struct aesd_dev *buffer){
     }
     else{
         // since device not full, out_off != in_off unless empty
-        for (i = buffer->out_offs; i != buffer->in_offs; i++){
-            if (i > AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED){
-                i = i % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-            }
+
+        for (i = buffer->out_offs; i != buffer->in_offs; i = (i+1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED){
             kfree(buffer->entry[i].buffptr);
         }
     }
+    kfree(buffer->curr_input.buffptr);
 }
 
 
