@@ -54,7 +54,6 @@ pthread_mutex_t *lmutex;
 
 // for SIGINT termination (since using single-thread)
 FILE *wptr;
-int write_fd;
 
 // handler for SIGINT and SIGTERM, exiting if signal
 void signal_handler (int signo)
@@ -65,10 +64,10 @@ void signal_handler (int signo)
         }
         else{
             syslog(LOG_DEBUG, "Caught signal, exiting");
+            #ifndef USE_AESD_CHAR_DEVICE
             if (wptr){
                 fclose(wptr);
             }
-            #ifndef USE_AESD_CHAR_DEVICE
             remove(FILENAME);
             #endif
             closelog();
@@ -174,6 +173,12 @@ void* handleRequests(void* thread_param) {
             pthread_mutex_lock(fmutex);
 
             #ifdef USE_AESD_CHAR_DEVICE
+            int write_fd = open(FILENAME, O_WRONLY);
+            if (write_fd < 0) {
+                syslog(LOG_ERR, "Error opening device for write: %s", strerror(errno));
+                pthread_mutex_unlock(fmutex);
+                continue;
+            }
 
             ssize_t nmem_written = write(write_fd, recv_buf, bytes_read_socket);
             if (nmem_written < 0){
@@ -201,7 +206,7 @@ void* handleRequests(void* thread_param) {
                 bytes_to_send = read(local_read_fd, send_buf, BUFSIZE);
                 syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
             }
-
+            close(write_fd);
             close(local_read_fd);
             #else
             fseek(wptr, 0, SEEK_END);
@@ -273,14 +278,7 @@ int main(int argc, char **argv){
     }
     
     // opening file
-    #ifdef USE_AESD_CHAR_DEVICE 
-    write_fd = open(FILENAME, O_WRONLY);
-    if (write_fd < 0) {
-        syslog(LOG_ERR, "Error opening %s: %s", FILENAME, strerror(errno));
-        closelog();
-        exit(-1);
-    }
-    #else
+    #ifndef USE_AESD_CHAR_DEVICE 
     wptr = fopen(FILENAME, "w+"); // create file, overwrite if exists, with read and write permission
     #endif
     syslog (LOG_DEBUG, "Opening file: %s", FILENAME);
@@ -424,8 +422,6 @@ int main(int argc, char **argv){
     #ifndef USE_AESD_CHAR_DEVICE
     fclose(wptr);
     remove(FILENAME);
-    #else
-    close(write_fd);
     #endif
 
     syslog(LOG_DEBUG, "Shutting Down Server...");
