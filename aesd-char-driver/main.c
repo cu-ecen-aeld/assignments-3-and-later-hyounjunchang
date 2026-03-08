@@ -72,7 +72,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     size_t end_char_index = 0;
     size_t current_buffer_size;
     size_t new_fpos = 0;
-    int i;
+    uint8_t j, original_out_offs;
 
     char* kernel_buf;
     struct aesd_dev *dev;
@@ -132,7 +132,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             buf_index = (buf_index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
             end_char_index = 0;
 
-            dev->full = false;
             goto copy_to_userspace;
         }
         else{
@@ -143,7 +142,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             end_char_index = 0;
 
             bytes_read += bytes_left_curr_entry;
-            dev->full = false;
         }
     }
 
@@ -157,12 +155,14 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     PDEBUG("copy_to_user for read: %zu bytes", retval);
 
     // update dev structure
-    dev->out_offs = buf_index;
     dev->read_start_index = end_char_index;
 
     // update fpos
-    for (i = dev->out_offs; i != buf_index; i = (i+1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED){
-        new_fpos += dev->entry[i].size;
+    original_out_offs = dev->out_offs;
+    j = original_out_offs;
+    while (j != buf_index) {
+        new_fpos += dev->entry[j].size;
+        j = (j + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
     }
     new_fpos += end_char_index;
     *f_pos = new_fpos;
@@ -219,8 +219,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     
     // iterate through each byte received
     for (i = 0; i < count; i++){
-        curr_size++;
-
         if (new_buf[curr_size] == '\n'){
             // calculate new in_off
             uint8_t new_dev_in_offs = (dev->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
@@ -254,10 +252,11 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             }
             dev->curr_input.buffptr = new_buf;
         }
+        curr_size++;
 
     }
-    dev->entry[dev->in_offs].buffptr = new_buf;
-    dev->entry[dev->in_offs].size = curr_size;
+    dev->curr_input.buffptr = new_buf;
+    dev->curr_input.size = curr_size;
     retval = count;
     
     out:
@@ -353,20 +352,44 @@ void aesd_cleanup_module(void)
 uint8_t aesd_dev_find_entry_offset_for_fpos(struct aesd_dev *buffer,
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
-    int i;
     size_t count = 0;
+    uint8_t num_entries;
+
+    uint8_t read_index = buffer->out_offs;
+    uint8_t write_index = buffer->in_offs;
+    size_t read_start_index = buffer->read_start_index;
+    int i;
+
+    if (buffer->full){
+        num_entries = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+    else{
+        num_entries = (write_index-read_index)% AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+
     
-    for (i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++){
-        size_t curr_size = buffer->entry[i].size;
+    for (i = 0; i < num_entries; i++){
+        uint8_t curr_index = (read_index + i) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        size_t curr_size = buffer->entry[curr_index].size - read_start_index;
+        
         if (count + curr_size > char_offset){
             *entry_offset_byte_rtn = char_offset - count;
-            return i;
+            return curr_index;
+        }
+        else if (count + curr_size == char_offset){
+            *entry_offset_byte_rtn = char_offset - count;
+            return (curr_index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
         }
         count += curr_size;
+        read_start_index = 0;
     }
 
     return AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
 }
+
+
+
+
 /**
 * Adds entry @param add_entry to @param buffer in the location specified in buffer->in_offs.
 * If the buffer was already full, overwrites the oldest entry and advances buffer->out_offs to the
