@@ -305,12 +305,14 @@ int main(int argc, char **argv){
     SERVER_LISTENING = true;
     printf("server: waiting for connections...\n");
 
+    #ifndef USE_AESD_CHAR_DEVICE
     pthread_t timerthread;
     rv = pthread_create(&timerthread, NULL, writeTimeEvery10sec, NULL);
     if (rv != 0){
         syslog(LOG_ERR, "pthread_create() failed creating new thread, Error: %s", strerror(errno));
         CLOSE_SERVER = true;
     }
+    #endif
 
 
     while(!CLOSE_SERVER){
@@ -353,7 +355,9 @@ int main(int argc, char **argv){
 
     syslog(LOG_DEBUG, "Caught signal, exiting");
     
+    #ifndef USE_AESD_CHAR_DEVICE
     pthread_join(timerthread, NULL);
+    #endif
 
     // Remove all completed from list
     // Write to File
