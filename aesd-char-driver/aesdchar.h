@@ -8,7 +8,7 @@
 #ifndef AESD_CHAR_DRIVER_AESDCHAR_H_
 #define AESD_CHAR_DRIVER_AESDCHAR_H_
 
-#define AESD_DEBUG 1  //Remove comment on this line to enable debug
+//#define AESD_DEBUG 1  //Remove comment on this line to enable debug
 #define AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED 10
 
 #undef PDEBUG             /* undef it, just in case */
@@ -41,11 +41,12 @@ struct aesd_dev
     struct aesd_buffer_entry curr_input;
 
     uint8_t out_offs;
-    size_t read_start_index;
     uint8_t in_offs;
+
+    size_t total_bytes_evicted;
 
     bool full;
 
-    struct semaphore *sem; // locking structure
+    struct semaphore sem; // locking structure
 };
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */

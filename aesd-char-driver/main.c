@@ -12,6 +12,7 @@
  */
 
 // Claude AI chat history: https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
+// Initial code written by me was buggy, used Claude to fix bugs
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -71,12 +72,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     size_t start_char_index;
     size_t end_char_index = 0;
     size_t current_buffer_size;
-    size_t new_fpos = 0;
-    uint8_t j, original_out_offs;
 
     char* kernel_buf;
     struct aesd_dev *dev;
     size_t bytes_left_curr_entry;
+    uint8_t entries_read, total_entries;
 
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
     /**
@@ -86,7 +86,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     
     dev = filp->private_data;
     //acquire mutex
-    down(dev->sem);
+    down(&dev->sem);
+
+    // Update file pointer... on open, in case it is overrun
+    if (*f_pos < dev->total_bytes_evicted){
+        *f_pos = dev->total_bytes_evicted;  // snap f_pos forward on stale open
+    }
 
     kernel_buf = kmalloc(count, GFP_KERNEL);
     if (kernel_buf == NULL){
@@ -99,18 +104,30 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     buf_index = aesd_dev_find_entry_offset_for_fpos(dev, (size_t)*f_pos, &start_char_index);
 
     if (buf_index == AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED){
-        PDEBUG("Invalid fpos");
-        retval = -EFAULT;
+        PDEBUG("EOF");
+        retval = 0;  // EOF
         goto out;
     }
+
+    PDEBUG("buf_index=%d entry size=%zu buffptr=%p", buf_index, dev->entry[buf_index].size, dev->entry[buf_index].buffptr);
     
-   
-    // first start_char_index is given from ased_dev_find_entry_offset_for_fpos, rest are always 0
+    entries_read = 0;
+    if (dev->full && buf_index == dev->in_offs) {
+        total_entries = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    } else {
+        total_entries = (dev->in_offs - buf_index + AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+                        % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
     while (bytes_read < count){
-        // reached end of pointer, device is not full
-        if (buf_index == dev->in_offs && dev->full == false){
+        // with checking if buf_index has lapped back to in_offs accounting for full:
+        if (buf_index == dev->in_offs && !dev->full){
             goto copy_to_userspace;
         }
+        // AND add a separate check for having read all entries when full:
+        if (entries_read >= total_entries){
+            goto copy_to_userspace;
+        }
+        entries_read++;
 
         current_buffer_size = dev->entry[buf_index].size;
         bytes_left_curr_entry = current_buffer_size - start_char_index;
@@ -154,23 +171,13 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
     PDEBUG("copy_to_user for read: %zu bytes", retval);
 
-    // update dev structure
-    dev->read_start_index = end_char_index;
-
     // update fpos
-    original_out_offs = dev->out_offs;
-    j = original_out_offs;
-    while (j != buf_index) {
-        new_fpos += dev->entry[j].size;
-        j = (j + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    }
-    new_fpos += end_char_index;
-    *f_pos = new_fpos;
+    *f_pos += bytes_read;
     
     out:
     kfree(kernel_buf);
     //release mutex
-    up(dev->sem);
+    up(&dev->sem);
 
     return retval;
 }
@@ -180,17 +187,21 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 {
     ssize_t retval = -ENOMEM;
     struct aesd_dev *dev;
-    char* new_buf;
-    size_t curr_size, new_bufsize;
+    char* new_buf = NULL;
+    char* old_buf = NULL;
+    size_t curr_size, new_bufsize, remaining;
     int i;
 
-    PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle write
-     */
     dev = filp->private_data;
     //acquire mutex
-    down(dev->sem);
+    down(&dev->sem);
+
+
+    PDEBUG("curr_size=%zu in_offs=%d out_offs=%d full=%d total_evicted=%zu",
+       dev->curr_input.size, dev->in_offs, dev->out_offs, 
+       dev->full, dev->total_bytes_evicted);
+
+    PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
 
     // we ignore f_pos for this assignment, and write to buffer
     curr_size = dev->curr_input.size;
@@ -220,48 +231,59 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     // iterate through each byte received
     for (i = 0; i < count; i++){
         if (new_buf[curr_size] == '\n'){
-            // calculate new in_off
             uint8_t new_dev_in_offs = (dev->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
             
-            // entry is full
             if (dev->full){
+                dev->total_bytes_evicted += dev->entry[dev->out_offs].size;
+                kfree(dev->entry[dev->out_offs].buffptr);
                 dev->out_offs = (dev->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-                kfree(dev->entry[dev->in_offs].buffptr);
             }
-            // buffer full with new entry
             else if (new_dev_in_offs == dev->out_offs){
                 dev->full = true;
+                PDEBUG("buffer now full, in_offs=%d out_offs=%d", dev->in_offs, dev->out_offs);
             }
 
-            // update entry
+            // commit entry including '\n'
             dev->entry[dev->in_offs].buffptr = new_buf;
-            dev->entry[dev->in_offs].size = curr_size;
+            dev->entry[dev->in_offs].size = curr_size + 1;
             dev->in_offs = new_dev_in_offs;
 
-            // update current input
-            dev->curr_input.buffptr = NULL;
-            dev->curr_input.size = 0;
+            // Debug message
+            PDEBUG("committed entry[%d] size=%zu in_offs now=%d",
+            dev->in_offs-1, dev->entry[(dev->in_offs-1+AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)%AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED].size,
+            dev->in_offs);
 
-            // create new memory
-            new_bufsize = count - i;
-            new_buf = kmalloc(new_bufsize, GFP_KERNEL);
-            if (new_buf == NULL){
-                PDEBUG("kmalloc error, partial write done");
+            // allocate new buffer for remaining bytes
+            remaining = count - i - 1;
+            // copy remaining bytes into new buffer
+            old_buf = new_buf;
+            new_buf = kmalloc(remaining + 1, GFP_KERNEL);
+                        if (new_buf == NULL){
+                dev->curr_input.buffptr = NULL;
+                dev->curr_input.size = 0;
                 retval = (i+1);
                 goto out;
             }
+
+            if (remaining > 0){
+                memcpy(new_buf, old_buf + curr_size + 1, remaining);
+            }
+
+
             dev->curr_input.buffptr = new_buf;
+            dev->curr_input.size = remaining;
+            curr_size = 0;  // reset — next byte is at index 0 of new buffer
+            continue;       // don't increment curr_size below
         }
         curr_size++;
-
     }
-    dev->curr_input.buffptr = new_buf;
+        dev->curr_input.buffptr = new_buf;
     dev->curr_input.size = curr_size;
     retval = count;
     
     out:
     //release mutex
-    up(dev->sem);
+    up(&dev->sem);
     return retval;
 }
 struct file_operations aesd_fops = {
@@ -309,9 +331,9 @@ int aesd_init_module(void)
     aesd_device.curr_input.buffptr = NULL;
 
     aesd_device.out_offs = 0;
-    aesd_device.read_start_index = 0;
     aesd_device.in_offs = 0;
     aesd_device.full = false;
+    aesd_device.total_bytes_evicted = 0;
 
     for (i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++){
         aesd_device.entry[i].buffptr = NULL;
@@ -319,7 +341,7 @@ int aesd_init_module(void)
     }
     
     // intialize mutex
-    sema_init(aesd_device.sem, 1);
+    sema_init(&aesd_device.sem, 1);
 
     result = aesd_setup_cdev(&aesd_device);
 
@@ -347,18 +369,25 @@ void aesd_cleanup_module(void)
 
 // aesd_dev helper functions
 
-// returns index of buffer pointer if position found, returns AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED if position not found
+// returns index of buffeelse ifr pointer if position found, returns AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED if position not found
 // entry_offset_byte_rtn is updated
 uint8_t aesd_dev_find_entry_offset_for_fpos(struct aesd_dev *buffer,
-            size_t char_offset, size_t *entry_offset_byte_rtn )
-{
+            size_t char_offset, size_t *entry_offset_byte_rtn ){
     size_t count = 0;
     uint8_t num_entries;
 
     uint8_t read_index = buffer->out_offs;
     uint8_t write_index = buffer->in_offs;
-    size_t read_start_index = buffer->read_start_index;
+
     int i;
+    PDEBUG("find_entry: char_offset=%zu out_offs=%d in_offs=%d full=%d total_evicted=%zu",
+       char_offset, buffer->out_offs, buffer->in_offs, buffer->full, buffer->total_bytes_evicted);
+
+    if (char_offset < buffer->total_bytes_evicted){
+        return AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;  // EOF - data is gone
+    }else {
+        char_offset -= buffer->total_bytes_evicted;
+    }
 
     if (buffer->full){
         num_entries = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
@@ -370,20 +399,14 @@ uint8_t aesd_dev_find_entry_offset_for_fpos(struct aesd_dev *buffer,
     
     for (i = 0; i < num_entries; i++){
         uint8_t curr_index = (read_index + i) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-        size_t curr_size = buffer->entry[curr_index].size - read_start_index;
+        size_t curr_size = buffer->entry[curr_index].size;
         
         if (count + curr_size > char_offset){
             *entry_offset_byte_rtn = char_offset - count;
             return curr_index;
         }
-        else if (count + curr_size == char_offset){
-            *entry_offset_byte_rtn = char_offset - count;
-            return (curr_index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-        }
         count += curr_size;
-        read_start_index = 0;
     }
-
     return AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
 }
 
