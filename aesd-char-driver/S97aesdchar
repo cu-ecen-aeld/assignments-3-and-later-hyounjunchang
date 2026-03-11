@@ -1,0 +1,40 @@
+#!/bin/sh
+# Assignment 8: https://claude.ai/chat/1b5c7fb7-1838-4e1b-83ca-cc9de6c2a845
+# Assignment 7: https://claude.ai/chat/52a7fcbb-e345-4cd7-ab27-c090f0d200f7
+#from ldd3 repo
+
+module_unload(){
+    module=$1
+    device=$1
+
+    if [ $# -ne 1 ]; then
+        echo "Wrong number of arguments"
+        echo "usage: $0 module_name"
+        echo "Will unload the module specified by module_name and remove assocaited device"
+        exit 1
+    fi
+
+    # invoke rmmod with all arguments we got
+    rmmod $module || exit 1
+
+    # Remove stale nodes
+    rm -f /dev/${device}
+}
+
+case "$1" in 
+    start)
+        echo "Setting up aesdchar..."
+        modprobe aesdchar
+        MAJOR=$(awk "\$2==\"aesdchar\" {print \$1}" /proc/devices)
+        mknod /dev/aesdchar c $MAJOR 0
+        ;;
+    stop)
+        echo "Closing aesdchar..."
+        module_unload aesdchar
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+esac
+
+exit 0
