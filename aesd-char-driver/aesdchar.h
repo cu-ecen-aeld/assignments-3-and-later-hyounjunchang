@@ -49,4 +49,32 @@ struct aesd_dev
 
     struct semaphore sem; // locking structure
 };
+
+
+/**
+ * Returns the total number of bytes currently readable in the device,
+ * including total_bytes_evicted (absolute file offset of the oldest entry).
+ * Caller must hold dev->sem.
+ */
+static inline loff_t aesd_dev_size(const struct aesd_dev *dev)
+{
+    loff_t size = dev->total_bytes_evicted;
+    uint8_t num_entries, i;
+
+    if (dev->full) {
+        num_entries = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    } else {
+        num_entries = (dev->in_offs - dev->out_offs +
+                       AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+                      % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+
+    for (i = 0; i < num_entries; i++) {
+        uint8_t idx = (dev->out_offs + i) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        size += dev->entry[idx].size;
+    }
+
+    return size;
+}
+
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */

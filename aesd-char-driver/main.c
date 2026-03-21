@@ -12,6 +12,7 @@
  */
 
 // Claude AI chat history: https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
+// Claude AI assignment 9: https://claude.ai/chat/1b0201fe-3c19-4704-ad0b-8d86ac1c2866
 // Initial code written by me was buggy, used Claude to fix bugs
 
 #include <linux/module.h>
@@ -87,11 +88,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     dev = filp->private_data;
     //acquire mutex
     down(&dev->sem);
-
-    // Update file pointer... on open, in case it is overrun
-    if (*f_pos < dev->total_bytes_evicted){
-        *f_pos = dev->total_bytes_evicted;  // snap f_pos forward on stale open
-    }
 
     kernel_buf = kmalloc(count, GFP_KERNEL);
     if (kernel_buf == NULL){
@@ -280,14 +276,51 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         dev->curr_input.buffptr = new_buf;
     dev->curr_input.size = curr_size;
     retval = count;
+    *f_pos += retval;   /* advance caller's file position by bytes accepted */
     
     out:
     //release mutex
     up(&dev->sem);
     return retval;
 }
+
+loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
+{
+    loff_t newpos;
+    loff_t dev_size;
+    struct aesd_dev *dev = filp->private_data;
+
+    down(&dev->sem);
+    dev_size = aesd_dev_size(dev);   /* replaces the for-loop in llseek */
+
+    switch (whence) {
+    case SEEK_SET:
+        newpos = offset;
+        break;
+    case SEEK_CUR:
+        newpos = filp->f_pos + offset;
+        break;
+    case SEEK_END:                  /* offset=0 → one past last byte (POSIX) */
+        newpos = dev_size + offset;
+        break;
+    default:
+        up(&dev->sem);
+        return -EINVAL;
+    }
+
+    if (newpos < 0 || newpos > dev_size) {
+        up(&dev->sem);
+        return -EINVAL;
+    }
+
+    filp->f_pos = newpos;
+    up(&dev->sem);
+    return newpos;
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
+    .llseek =   aesd_llseek,
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
