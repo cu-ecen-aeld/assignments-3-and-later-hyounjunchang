@@ -4,6 +4,8 @@
  *  Created on: Oct 23, 2019
  *      Author: Dan Walkes
  */
+// Claude AI chat history: https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
+// Claude AI assignment 9: https://claude.ai/chat/1b0201fe-3c19-4704-ad0b-8d86ac1c2866
 
 #ifndef AESD_CHAR_DRIVER_AESDCHAR_H_
 #define AESD_CHAR_DRIVER_AESDCHAR_H_
