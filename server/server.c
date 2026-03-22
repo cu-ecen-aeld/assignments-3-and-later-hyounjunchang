@@ -5,6 +5,8 @@ Modified by Hyounjun Chang for ECEN5713
 
 For Assignment 8: Claude AI was used to debug
 https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
+
+Assignment 9: https://claude.ai/chat/1b0201fe-3c19-4704-ad0b-8d86ac1c2866
 */
 
 #include <stdio.h>
@@ -23,6 +25,9 @@ https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
 #include <syslog.h>
 #include <fcntl.h>
 #include <stdbool.h>
+
+#include <sys/ioctl.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define PORT "9000"  // the port users will be connecting to
 #define BACKLOG 10     // how many pending connections queue holds
@@ -139,6 +144,31 @@ void* writeTimeEvery10sec(void* thread_param){
     return thread_param;
 }
 
+/**
+ * Checks if buf is exactly "AESDCHAR_IOCSEEKTO:X,Y\n"
+ * If matched, fills seekto and returns true.
+ */
+static bool parse_ioctl_cmd(const char *buf, ssize_t len,
+                             struct aesd_seekto *seekto)
+{
+    const char *prefix = "AESDCHAR_IOCSEEKTO:";
+    size_t prefix_len = strlen(prefix);
+
+    if ((size_t)len <= prefix_len)
+        return false;
+
+    if (strncmp(buf, prefix, prefix_len) != 0)
+        return false;
+
+    unsigned int x, y;
+    if (sscanf(buf + prefix_len, "%u,%u", &x, &y) != 2)
+        return false;
+
+    seekto->write_cmd        = x;
+    seekto->write_cmd_offset = y;
+    return true;
+}
+
 void* handleRequests(void* thread_param) {
     struct entry* thread_func_args = (struct entry*) thread_param;
 
@@ -173,41 +203,50 @@ void* handleRequests(void* thread_param) {
             pthread_mutex_lock(fmutex);
 
             #ifdef USE_AESD_CHAR_DEVICE
-            int write_fd = open(FILENAME, O_WRONLY);
-            if (write_fd < 0) {
-                syslog(LOG_ERR, "Error opening device for write: %s", strerror(errno));
-                pthread_mutex_unlock(fmutex);
-                continue;
-            }
+            {
+                struct aesd_seekto seekto;
+                recv_buf[bytes_read_socket] = '\0';  /* null-terminate for sscanf */
 
-            ssize_t nmem_written = write(write_fd, recv_buf, bytes_read_socket);
-            if (nmem_written < 0){
-                syslog(LOG_ERR, "Error with fwrite(), Error: %s", strerror(errno));
-            }
-            
-            int local_read_fd = open(FILENAME, O_RDONLY);
-            if (local_read_fd < 0) {
-                syslog(LOG_ERR, "Error opening device for read: %s", strerror(errno));
-                pthread_mutex_unlock(fmutex);
-                continue;
-            }
-            ssize_t bytes_to_send = read(local_read_fd, send_buf, BUFSIZE);
-
-
-            syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
-            while (bytes_to_send > 0){
-                ssize_t bytes_sent_socket = sendto(conn_fd, send_buf, bytes_to_send, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-                if (bytes_sent_socket != bytes_to_send){
-                    syslog(LOG_ERR, "Error with send(), Error: %s", strerror(errno));
+                int dev_fd = open(FILENAME, O_RDWR);
+                if (dev_fd < 0) {
+                    syslog(LOG_ERR, "Error opening device: %s", strerror(errno));
+                    pthread_mutex_unlock(fmutex);
+                    continue;
                 }
-                else{
-                    syslog(LOG_DEBUG, "Bytes sent: %ld", bytes_to_send);
+
+                if (parse_ioctl_cmd(recv_buf, bytes_read_socket, &seekto)) {
+                    /* ioctl seek path */
+                    syslog(LOG_DEBUG, "ioctl seek: write_cmd=%u write_cmd_offset=%u",
+                        seekto.write_cmd, seekto.write_cmd_offset);
+
+                    if (ioctl(dev_fd, AESDCHAR_IOCSEEKTO, &seekto) < 0) {
+                        syslog(LOG_ERR, "ioctl failed: %s", strerror(errno));
+                        close(dev_fd);
+                        pthread_mutex_unlock(fmutex);
+                        continue;
+                    }
+                } else {
+                    /* normal write path — append then seek to start for read */
+                    if (write(dev_fd, recv_buf, bytes_read_socket) < 0)
+                        syslog(LOG_ERR, "write failed: %s", strerror(errno));
+                    lseek(dev_fd, 0, SEEK_SET);
                 }
-                bytes_to_send = read(local_read_fd, send_buf, BUFSIZE);
-                syslog(LOG_DEBUG, "Bytes to send: %ld", bytes_to_send);
+
+                /* send contents from current f_pos to client */
+                ssize_t bytes_to_send = read(dev_fd, send_buf, BUFSIZE);
+                while (bytes_to_send > 0) {
+                    ssize_t bytes_sent = sendto(conn_fd, send_buf, bytes_to_send, 0,
+                                                (struct sockaddr *)&client_addr,
+                                                sizeof(client_addr));
+                    if (bytes_sent != bytes_to_send)
+                        syslog(LOG_ERR, "sendto() error: %s", strerror(errno));
+                    else
+                        syslog(LOG_DEBUG, "Bytes sent: %ld", bytes_to_send);
+                    bytes_to_send = read(dev_fd, send_buf, BUFSIZE);
+                }
+
+                close(dev_fd);
             }
-            close(write_fd);
-            close(local_read_fd);
             #else
             fseek(wptr, 0, SEEK_END);
 
