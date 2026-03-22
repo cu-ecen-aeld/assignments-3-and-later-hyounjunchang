@@ -52,7 +52,7 @@ struct aesd_dev
     struct semaphore sem; // locking structure
 };
 
-
+#ifdef __KERNEL__
 /**
  * Returns the total number of bytes currently readable in the device,
  * including total_bytes_evicted (absolute file offset of the oldest entry).
@@ -78,5 +78,6 @@ static inline loff_t aesd_dev_size(const struct aesd_dev *dev)
 
     return size;
 }
+#endif
 
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */
