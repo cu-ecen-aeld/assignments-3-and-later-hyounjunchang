@@ -154,6 +154,8 @@ static bool parse_ioctl_cmd(const char *buf, ssize_t len,
     const char *prefix = "AESDCHAR_IOCSEEKTO:";
     size_t prefix_len = strlen(prefix);
 
+    syslog(LOG_DEBUG, "parse_ioctl_cmd: len=%zd buf='%s'", len, buf);
+
     if ((size_t)len <= prefix_len)
         return false;
 
@@ -166,6 +168,8 @@ static bool parse_ioctl_cmd(const char *buf, ssize_t len,
 
     seekto->write_cmd        = x;
     seekto->write_cmd_offset = y;
+    syslog(LOG_DEBUG, "parse_ioctl_cmd matched: write_cmd=%u write_cmd_offset=%u",
+           x, y);
     return true;
 }
 
@@ -215,17 +219,19 @@ void* handleRequests(void* thread_param) {
                 }
 
                 if (parse_ioctl_cmd(recv_buf, bytes_read_socket, &seekto)) {
-                    /* ioctl seek path */
                     syslog(LOG_DEBUG, "ioctl seek: write_cmd=%u write_cmd_offset=%u",
                         seekto.write_cmd, seekto.write_cmd_offset);
 
-                    if (ioctl(dev_fd, AESDCHAR_IOCSEEKTO, &seekto) < 0) {
+                    long newpos = ioctl(dev_fd, AESDCHAR_IOCSEEKTO, &seekto);
+                    if (newpos < 0) {
                         syslog(LOG_ERR, "ioctl failed: %s", strerror(errno));
                         close(dev_fd);
                         pthread_mutex_unlock(fmutex);
                         continue;
                     }
-                } else {
+                    syslog(LOG_DEBUG, "ioctl returned newpos=%ld", newpos);
+                } 
+                else {
                     /* normal write path — append then seek to start for read */
                     if (write(dev_fd, recv_buf, bytes_read_socket) < 0)
                         syslog(LOG_ERR, "write failed: %s", strerror(errno));
@@ -234,6 +240,7 @@ void* handleRequests(void* thread_param) {
 
                 /* send contents from current f_pos to client */
                 ssize_t bytes_to_send = read(dev_fd, send_buf, BUFSIZE);
+                syslog(LOG_DEBUG, "first read after seek: bytes_to_send=%zd", bytes_to_send);
                 while (bytes_to_send > 0) {
                     ssize_t bytes_sent = sendto(conn_fd, send_buf, bytes_to_send, 0,
                                                 (struct sockaddr *)&client_addr,
