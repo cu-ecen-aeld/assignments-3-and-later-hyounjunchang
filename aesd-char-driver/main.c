@@ -12,6 +12,7 @@
  */
 
 // Claude AI chat history: https://claude.ai/chat/63e236bb-6020-40a9-ae6b-258c7edeb090
+// Claude AI assignment 9: https://claude.ai/chat/1b0201fe-3c19-4704-ad0b-8d86ac1c2866
 // Initial code written by me was buggy, used Claude to fix bugs
 
 #include <linux/module.h>
@@ -25,6 +26,7 @@ int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
 #include <linux/slab.h> // kfree kmalloc
+#include "aesd_ioctl.h"
 
 MODULE_AUTHOR("Hyounjun Chang");
 MODULE_LICENSE("Dual BSD/GPL");
@@ -87,11 +89,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     dev = filp->private_data;
     //acquire mutex
     down(&dev->sem);
-
-    // Update file pointer... on open, in case it is overrun
-    if (*f_pos < dev->total_bytes_evicted){
-        *f_pos = dev->total_bytes_evicted;  // snap f_pos forward on stale open
-    }
 
     kernel_buf = kmalloc(count, GFP_KERNEL);
     if (kernel_buf == NULL){
@@ -280,18 +277,109 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         dev->curr_input.buffptr = new_buf;
     dev->curr_input.size = curr_size;
     retval = count;
+    *f_pos += retval;   /* advance caller's file position by bytes accepted */
     
     out:
     //release mutex
     up(&dev->sem);
     return retval;
 }
+
+loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
+{
+    loff_t newpos;
+    loff_t dev_size;
+    struct aesd_dev *dev = filp->private_data;
+
+    down(&dev->sem);
+    dev_size = aesd_dev_size(dev);   /* replaces the for-loop in llseek */
+
+    switch (whence) {
+    case SEEK_SET:
+        newpos = offset;
+        break;
+    case SEEK_CUR:
+        newpos = filp->f_pos + offset;
+        break;
+    case SEEK_END:                  /* offset=0 → one past last byte (POSIX) */
+        newpos = dev_size + offset;
+        break;
+    default:
+        up(&dev->sem);
+        return -EINVAL;
+    }
+
+    if (newpos < 0 || newpos > dev_size) {
+        up(&dev->sem);
+        return -EINVAL;
+    }
+
+    filp->f_pos = newpos;
+    up(&dev->sem);
+    return newpos;
+}
+
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    struct aesd_dev *dev = filp->private_data;
+    struct aesd_seekto seekto;
+    loff_t newpos = 0;
+    uint8_t i, entry_idx, num_entries;
+
+    if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC)  return -ENOTTY;
+    if (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR) return -ENOTTY;
+
+    switch (cmd) {
+    case AESDCHAR_IOCSEEKTO:
+        if (copy_from_user(&seekto, (const void __user *)arg, sizeof(seekto)))
+            return -EFAULT;
+
+        down(&dev->sem);
+
+        num_entries = dev->full ? AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED
+                                : (dev->in_offs - dev->out_offs +
+                                   AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+                                  % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        
+        // entry out of range
+        if (seekto.write_cmd >= num_entries) {
+            up(&dev->sem);
+            return -EINVAL;
+        }
+
+        entry_idx = (dev->out_offs + seekto.write_cmd)
+                    % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+
+        // index out of range for entry
+        if (seekto.write_cmd_offset >= dev->entry[entry_idx].size) {
+            up(&dev->sem);
+            return -EINVAL;
+        }
+
+        newpos = dev->total_bytes_evicted;
+        for (i = 0; i < seekto.write_cmd; i++) {
+            uint8_t idx = (dev->out_offs + i) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+            newpos += dev->entry[idx].size;
+        }
+        newpos += seekto.write_cmd_offset;
+
+        filp->f_pos = newpos;
+        up(&dev->sem);
+        return newpos;
+
+    default:
+        return -ENOTTY;
+    }
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
+    .llseek =   aesd_llseek,
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
     .release =  aesd_release,
+    .unlocked_ioctl = aesd_ioctl,   /* use unlocked_ioctl, not ioctl */
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
